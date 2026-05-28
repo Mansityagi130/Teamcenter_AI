@@ -15,7 +15,7 @@ Render runs the Python FastAPI service. Since Render containers are ephemeral, w
 4. Set the following details:
    - **Name**: `teamcenter-ai-backend` (or your choice)
    - **Environment/Runtime**: `Python`
-   - **Build Command**: `pip install -r requirements.txt`
+   - **Build Command**: `pip install --no-cache-dir --only-binary=:all: -r requirements.txt`
    - **Start Command**: `uvicorn backend:app --host 0.0.0.0 --port 10000` *(Render sets standard PORT environment variable; Uvicorn binds to all interfaces)*
 
 ### Step 2: Configure a Persistent Disk

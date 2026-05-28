@@ -6,7 +6,6 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
-import pandas as pd
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -30,27 +29,10 @@ def init_data_file() -> None:
     # No-op since init_db in backend.py creates tables and migrates CSV
     pass
 
-def load_items_df() -> pd.DataFrame:
+def item_exists(item_id: str) -> bool:
     with get_db_connection() as conn:
-        cursor = conn.execute(
-            """
-            SELECT i.item_id, i.item_name, i.item_description, 
-                   i.createdAt, i.updatedAt, i.createdBy,
-                   COALESCE(r.revision_id, 'A') as revision_id
-            FROM items i
-            LEFT JOIN (
-                SELECT item_id, revision_id 
-                FROM revisions 
-                WHERE id IN (SELECT MAX(id) FROM revisions GROUP BY item_id)
-            ) r ON i.item_id = r.item_id
-            """
-        )
-        rows = cursor.fetchall()
-        
-    df = pd.DataFrame([dict(r) for r in rows], columns=["item_id", "item_name", "item_description", "revision_id", "createdAt", "updatedAt", "createdBy"])
-    for col in ["item_id", "item_name", "item_description", "revision_id", "createdAt", "updatedAt", "createdBy"]:
-        df[col] = df[col].fillna("").astype(str).str.strip()
-    return df
+        row = conn.execute("SELECT 1 FROM items WHERE item_id = ?", (item_id.strip(),)).fetchone()
+        return row is not None
 
 def increment_revision(prev_rev: str) -> str:
     if not prev_rev:
@@ -575,8 +557,7 @@ def handle_workflow_message(session_id: str, user_id: str, message: str, gemini_
             ), True
 
         # Check if Item ID already exists
-        df = load_items_df()
-        if item_id in df["item_id"].values:
+        if item_exists(item_id):
             # Reset item_id in data so they can provide a new one
             data["item_id"] = None
             save_workflow_state(session_id, "AWAITING_DETAILS", data)

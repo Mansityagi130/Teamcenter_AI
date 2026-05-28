@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 import re
 import random
 
-import pandas as pd
 from pydantic import BaseModel, Field
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Form, status
 from fastapi.responses import HTMLResponse, FileResponse
@@ -565,32 +564,34 @@ def init_db() -> None:
         csv_file = DATA_FILE
         if csv_file.exists():
             try:
-                df = pd.read_csv(csv_file, dtype=str, keep_default_na=False)
-                for _, row in df.iterrows():
-                    item_id = row.get("item_id", "").strip()
-                    if not item_id:
-                        continue
-                    item_name = row.get("item_name", "").strip()
-                    item_description = row.get("item_description", "").strip()
-                    revision_id = row.get("revision_id", "").strip() or "A"
-                    
-                    now = datetime.utcnow().isoformat()
-                    
-                    # Insert item if not exists
-                    cursor = conn.execute("SELECT 1 FROM items WHERE item_id = ?", (item_id,))
-                    if cursor.fetchone() is None:
-                        conn.execute(
-                            "INSERT INTO items (item_id, item_name, item_description, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?)",
-                            (item_id, item_name, item_description, now, now, "system")
-                        )
-                    
-                    # Insert revision if not exists
-                    cursor = conn.execute("SELECT 1 FROM revisions WHERE item_id = ? AND revision_id = ?", (item_id, revision_id))
-                    if cursor.fetchone() is None:
-                        conn.execute(
-                            "INSERT INTO revisions (revision_id, item_id, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?)",
-                            (revision_id, item_id, now, now, "system")
-                        )
+                import csv
+                with open(csv_file, mode="r", encoding="utf-8-sig") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        item_id = (row.get("item_id") or "").strip()
+                        if not item_id:
+                            continue
+                        item_name = (row.get("item_name") or "").strip()
+                        item_description = (row.get("item_description") or "").strip()
+                        revision_id = (row.get("revision_id") or "").strip() or "A"
+                        
+                        now = datetime.utcnow().isoformat()
+                        
+                        # Insert item if not exists
+                        cursor = conn.execute("SELECT 1 FROM items WHERE item_id = ?", (item_id,))
+                        if cursor.fetchone() is None:
+                            conn.execute(
+                                "INSERT INTO items (item_id, item_name, item_description, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?)",
+                                (item_id, item_name, item_description, now, now, "system")
+                            )
+                        
+                        # Insert revision if not exists
+                        cursor = conn.execute("SELECT 1 FROM revisions WHERE item_id = ? AND revision_id = ?", (item_id, revision_id))
+                        if cursor.fetchone() is None:
+                            conn.execute(
+                                "INSERT INTO revisions (revision_id, item_id, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?)",
+                                (revision_id, item_id, now, now, "system")
+                            )
                 conn.commit()
                 bak_file = csv_file.with_suffix(".csv.bak")
                 if not bak_file.exists():
@@ -607,8 +608,7 @@ def init_data_file() -> None:
     workflow.init_data_file()
 
 
-def load_items_df() -> pd.DataFrame:
-    return workflow.load_items_df()
+
 
 
 def normalize_item_id(item_id: str) -> str:
@@ -1258,12 +1258,13 @@ def generate_and_save_response(
             revision_id: Custom revision ID (defaults to 'A').
         """
         try:
-            df = load_items_df()
             normalized = normalize_item_id(item_id)
             if not normalized:
                 return "Error: Item ID is required."
-            if normalized in df["item_id"].astype(str).values:
-                return f"Error: Item {normalized} already exists."
+            with get_db_connection() as conn:
+                row = conn.execute("SELECT 1 FROM items WHERE item_id = ?", (normalized,)).fetchone()
+                if row is not None:
+                    return f"Error: Item {normalized} already exists."
             
             workflow.save_item_to_csv(
                 item_id=normalized,
@@ -1498,11 +1499,11 @@ def generate_and_save_response(
             item_id: The ID of the item to search for.
         """
         try:
-            df = load_items_df()
             normalized = normalize_item_id(item_id)
             with get_db_connection() as c:
                 log_user_activity(c, user_id, "/item/search", f"chat_search_item:{normalized}")
-            if normalized in df["item_id"].astype(str).values:
+                row = c.execute("SELECT 1 FROM items WHERE item_id = ?", (normalized,)).fetchone()
+            if row is not None:
                 return f"Item {normalized} exists in Teamcenter."
             else:
                 return f"Item {normalized} was not found."
@@ -2521,12 +2522,28 @@ def health_check_ai() -> Dict[str, str]:
 @app.post("/item/search")
 def search_item(request: ItemRequest, _: str = Depends(get_authenticated_user_id)) -> Dict[str, object]:
     item_id = normalize_item_id(request.item_id)
-    df = load_items_df()
-    item = df[df["item_id"] == item_id]
-    if item.empty:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
-    result = item.to_dict(orient="records")[0]
     with get_db_connection() as conn:
+        cursor = conn.execute(
+            """
+            SELECT i.item_id, i.item_name, i.item_description, 
+                   i.createdAt, i.updatedAt, i.createdBy,
+                   COALESCE(r.revision_id, 'A') as revision_id
+            FROM items i
+            LEFT JOIN (
+                SELECT item_id, revision_id 
+                FROM revisions 
+                WHERE id IN (SELECT MAX(id) FROM revisions GROUP BY item_id)
+            ) r ON i.item_id = r.item_id
+            WHERE i.item_id = ?
+            """,
+            (item_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+        result = dict(row)
+        for key, val in result.items():
+            result[key] = "" if val is None else str(val).strip()
         log_user_activity(conn, _, "/item/search", "item_search")
     return result
 
@@ -2536,9 +2553,10 @@ def add_item(request: ItemRequest, _: str = Depends(get_authenticated_user_id)) 
     item_id = normalize_item_id(request.item_id)
     if not item_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Item ID is required")
-    df = load_items_df()
-    if item_id in df["item_id"].values:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Item already exists")
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT 1 FROM items WHERE item_id = ?", (item_id,)).fetchone()
+        if row:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Item already exists")
     
     revision_id = request.revision_id
     workflow.save_item_to_csv(
@@ -2555,8 +2573,28 @@ def add_item(request: ItemRequest, _: str = Depends(get_authenticated_user_id)) 
 
 @app.post("/item/list")
 def list_items(_: str = Depends(get_authenticated_user_id)) -> object:
-    df = load_items_df()
-    return df.to_dict(orient="records")
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            """
+            SELECT i.item_id, i.item_name, i.item_description, 
+                   i.createdAt, i.updatedAt, i.createdBy,
+                   COALESCE(r.revision_id, 'A') as revision_id
+            FROM items i
+            LEFT JOIN (
+                SELECT item_id, revision_id 
+                FROM revisions 
+                WHERE id IN (SELECT MAX(id) FROM revisions GROUP BY item_id)
+            ) r ON i.item_id = r.item_id
+            """
+        )
+        rows = cursor.fetchall()
+    result_list = []
+    for r in rows:
+        item_dict = dict(r)
+        for key, val in item_dict.items():
+            item_dict[key] = "" if val is None else str(val).strip()
+        result_list.append(item_dict)
+    return result_list
 
 
 @app.post("/item/update")

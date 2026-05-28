@@ -1,0 +1,11 @@
+backend.py
+workflow.py
+test_mcp.py
+llm.py
+requirements.txt
+backend_reference/
+venv/
+Data/
+docs/
+*.db
+*.log

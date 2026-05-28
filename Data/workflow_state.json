@@ -1,0 +1,32 @@
+{
+  "session_test_1779438972": {
+    "state": "AWAITING_DETAILS",
+    "data": {},
+    "previous_state": null
+  },
+  "session_test_1779439001": {
+    "state": "AWAITING_DETAILS",
+    "data": {},
+    "previous_state": null
+  },
+  "session_test3_1779439212": {
+    "state": "AWAITING_DETAILS",
+    "data": {},
+    "previous_state": null
+  },
+  "session_test_1779439355": {
+    "state": "AWAITING_DETAILS",
+    "data": {
+      "item_id": null,
+      "item_name": "Control Valve",
+      "item_description": "Main flow control valve",
+      "revision_option": "2"
+    },
+    "previous_state": null
+  },
+  "session_test3_1779439455": {
+    "state": "AWAITING_DETAILS",
+    "data": {},
+    "previous_state": null
+  }
+}

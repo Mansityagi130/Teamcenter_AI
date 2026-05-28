@@ -1,0 +1,281 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   TEAMCENTER PLM AI ASSISTANT - ENTERPRISE CUSTOM STYLES
+   ========================================================================== */
+
+:root {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  
+  /* Transition timings */
+  --transition-fast: 0.15s;
+  --transition-normal: 0.25s;
+  --transition-slow: 0.4s;
+}
+
+/* Material Symbols Outlined Custom Settings */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  vertical-align: middle;
+}
+
+/* Glassmorphism Styles */
+.glass-panel {
+  background: rgba(17, 34, 64, 0.7);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.glass-card {
+  background: rgba(17, 34, 64, 0.45);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* AI Highlight & Glow Effects */
+.ai-glow {
+  box-shadow: 0 0 20px rgba(0, 219, 231, 0.15);
+}
+
+.cyan-glow {
+  box-shadow: 0 0 15px 2px rgba(0, 219, 231, 0.15);
+}
+
+.cyan-glow-hover:hover {
+  box-shadow: 0 0 20px 4px rgba(0, 219, 231, 0.25);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #101416;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #323538;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8f9097;
+}
+
+/* Terminal Log Specific Scrollbar */
+.terminal-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.terminal-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 219, 231, 0.3);
+  border-radius: 10px;
+}
+
+.terminal-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 219, 231, 0.5);
+}
+
+/* Animations & Keyframes */
+@keyframes pulse-cyan {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-pulse-cyan {
+  animation: pulse-cyan 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 12s linear infinite;
+}
+
+/* Transition utility */
+.transition-all-normal {
+  transition: all var(--transition-normal) cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Layout Utilities */
+body {
+  background-color: #101416;
+  color: #e0e3e6;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Markdown Rendering Custom Styles inside bubble and feeds */
+.markdown-body {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.markdown-body h1, 
+.markdown-body h2, 
+.markdown-body h3, 
+.markdown-body h4 {
+  color: #e0e3e6;
+  font-weight: 600;
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+
+.markdown-body h1 { font-size: 1.25rem; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 4px; }
+.markdown-body h2 { font-size: 1.15rem; }
+.markdown-body h3 { font-size: 1.05rem; }
+.markdown-body h4 { font-size: 1.0rem; }
+
+.markdown-body p {
+  margin-bottom: 12px;
+}
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body strong {
+  color: #e0e3e6;
+  font-weight: 600;
+}
+
+.markdown-body code {
+  font-family: var(--font-mono);
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #74f5ff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.markdown-body pre {
+  background-color: #0b0f11;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+
+.markdown-body pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: #c5c6cd;
+  font-size: 13px;
+  display: block;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+  padding-left: 20px;
+  margin-bottom: 12px;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+  padding-left: 20px;
+  margin-bottom: 12px;
+}
+
+.markdown-body li {
+  margin-bottom: 6px;
+}
+.markdown-body li:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+
+.markdown-body th, 
+.markdown-body td {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.markdown-body blockquote {
+  border-left: 4px solid #00f1fe;
+  background-color: rgba(0, 241, 254, 0.05);
+  padding: 8px 16px;
+  margin: 12px 0;
+  border-radius: 0 4px 4px 0;
+}
+
+/* Suggestions Tags styling */
+.prompt-tag {
+  background: rgba(0, 241, 254, 0.05);
+  border: 1px solid rgba(0, 241, 254, 0.15);
+  color: #74f5ff;
+  transition: all var(--transition-fast) ease;
+}
+
+.prompt-tag:hover {
+  background: rgba(0, 241, 254, 0.12);
+  border-color: #00f1fe;
+  color: #ddfcff;
+}
+
+/* Layout animations */
+.fade-in-slide {
+  animation: fadeInSlide 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeInSlide {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* CAD Preview specific animations */
+.assembly-glow {
+  box-shadow: 0 0 30px rgba(0, 219, 231, 0.1);
+}
+.assembly-glow:hover {
+  box-shadow: 0 0 35px rgba(0, 219, 231, 0.2);
+}
+
+/* Custom switch checkbox */
+.switch-input:checked ~ .switch-dot {
+  transform: translateX(100%);
+  background-color: #00dbe7;
+}
+
+/* Tab active styles */
+.tab-link-active {
+  color: #00dbe7 !important;
+  background-color: rgba(0, 241, 254, 0.08) !important;
+  font-weight: 700;
+  border-right: 2px solid #00dbe7;
+}
+
+/* Custom loader animation */
+.loader-dot {
+  animation: loader-dot-bounce 1.4s infinite ease-in-out both;
+}
+.loader-dot:nth-child(1) { animation-delay: -0.32s; }
+.loader-dot:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes loader-dot-bounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1.0); }
+}

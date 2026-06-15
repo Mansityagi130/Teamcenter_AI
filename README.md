@@ -9,6 +9,13 @@ This project provides an enterprise-ready conversational interface for Siemens T
 
 ---
 
+## 🎯 Why This Project?
+Traditional Product Lifecycle Management (PLM) systems like Siemens Teamcenter are highly powerful but suffer from steep learning curves, dense hierarchical UIs, and complex navigation flows that slow down engineers. Simple tasks—such as finding a specific CAD dataset, checking approval status, or initiating revisions—often require multiple menus and deep training.
+
+This project demonstrates **conversational engineering**: bringing natural language interaction to PLM metadata workflows. By combining Generative AI with the **Model Context Protocol (MCP)**, this Copilot bridges LLMs directly to backend PLM APIs safely and securely. Instead of navigating menus, engineers can query, update, and manage Teamcenter resources conversationally. The business value is clear: dramatic productivity gains, shortened engineering cycle times, and a frictionless onboarding experience for new team members.
+
+---
+
 ## 📷 Application Screenshots
 
 ### Login Screen
@@ -26,6 +33,9 @@ This project provides an enterprise-ready conversational interface for Siemens T
 ### MCP Explorer
 ![MCP Explorer](docs/screenshots/mcp-explorer.png)
 
+### Security Logs
+![Security Logs](docs/screenshots/security-logs.png)
+
 ---
 
 ## ✨ Features
@@ -38,6 +48,36 @@ This project provides an enterprise-ready conversational interface for Siemens T
 * **Monitoring & Diagnostics**: Advanced database, API, and worker thread status monitoring with automatic log rotation/pruning.
 * **Health Dashboard**: A visual real-time health indicator showing API, database, and backend connectivity states.
 * **Security Logs**: Dedicated logging and visualization for critical security and administrative actions.
+
+---
+
+## 🔧 MCP Tool Ecosystem
+This project integrates the **Model Context Protocol (MCP)** to serve as a secure gateway between the LLM and the backend, avoiding exposing the database directly. The FastMCP server dynamically registers **32 tools** classified into these operational domains:
+
+* **Item Management**: Search, retrieve, update, and delete Teamcenter items and revisions.
+* **BOM Operations**: Fetch direct components and recursively expand deep Bill of Materials (BOM) trees.
+* **Workflow Management**: Create process templates, inspect progress, approve or reject engineering tasks, and list active workflows.
+* **Dataset Operations**: Locate, search, and download mock engineering datasets and CAD files.
+* **Metadata Discovery**: Dynamic schema queries listing supported object types and column constraints.
+* **Property Services**: Read single, batch, or all dynamic metadata properties for specific Teamcenter components.
+* **API Discovery**: Explore, search, and retrieve documentation and statistics for registered endpoints in the REST catalog.
+* **Health Monitoring**: Retrieve database diagnostics, active session rates, and authentication logs.
+* **User & Session Services**: Inspect profile configurations and active user session information.
+
+---
+
+## 🚀 Key Technical Highlights
+
+* **Three-Layer AI Routing Engine**: Achieves sub-40ms concept lookups by intercepting exact keywords locally (Layer 1), dynamically routing PLM actions via an MCP client (Layer 2), and forwarding general queries directly to the Gemini LLM (Layer 3).
+* **FastMCP Integration**: Exposes 32 secure, schema-validated database tools to the LLM over standard stdio channels, decoupling business logic from AI configuration.
+* **Stateful Slot-Filling Workflows**: Conversationally extracts missing parameters for complex multi-step PLM creations (Items, Datasets, Revisions) before committing to the database.
+* **JWT Authentication**: Secure stateless authentication and authorization flows utilizing cryptographically signed tokens.
+* **Role-Based Access Control (RBAC)**: Fine-grained user permissions controlling access to health dashboards, raw consoles, user management, and security audits.
+* **Audit Logging**: Structured log schema capturing timestamps, actor IDs, client IP addresses, browser User-Agent strings, and detailed database diffs.
+* **Monitoring & Observability**: Real-time event log streaming and automated log maintenance routines that prune records older than 365 days.
+* **Health Dashboard**: Dynamic React indicator monitors API, database, and background worker thread connectivity states.
+* **SQLite PLM Data Simulation**: Implements parent-child BOM structures, workflow states, and user sessions in a local relational schema.
+* **Enterprise Security Controls**: Restricts administrative role mutations to protect the system's last administrator from accidental self-lockouts.
 
 ---
 
@@ -150,6 +190,21 @@ The application utilizes a multi-layer stack to process actions cleanly:
 
 ---
 
+## 💼 Skills Demonstrated
+
+* **Full Stack Development**: End-to-end integration of React SPAs with FastAPI backend APIs and SQLite storage layers.
+* **FastAPI Backend Engineering**: Asynchronous event loop offloading using `asyncio.to_thread` for non-blocking I/O operations.
+* **React + TypeScript Development**: Redux state architectures, type-safe data pipelines, and responsive custom Vanilla CSS components.
+* **Enterprise Security Design**: Cryptographic JWT authentication, Role-Based Access Control (RBAC), and self-lockout database guard rails.
+* **AI/LLM Integration**: Intent routing classifiers, dynamic context prompting, and rate-limiting controls.
+* **MCP (Model Context Protocol)**: Stdio-based subprocess execution and dynamic tool discovery.
+* **Database Design**: Structured relational schemas, parent-child BOM indexes, and automated data rotation policies.
+* **Authentication & Authorization**: Header-based token injection, session validation middleware, and user password hashing.
+* **Observability & Monitoring**: Structured audit trailing, client header capturing, and real-time backend health tracking.
+* **System Architecture Design**: Reusable wrappers, REST API catalogs, and decoupled tool layers.
+
+---
+
 ## 🔮 Future Scope
 
 * **Teamcenter Authentication**: Native integration with Siemens Teamcenter Security Services.
@@ -159,4 +214,3 @@ The application utilizes a multi-layer stack to process actions cleanly:
 ---
 
 * **Last Updated**: June 16, 2026 (GitHub Portfolio Showcase Pass)
-

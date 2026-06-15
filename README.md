@@ -9,24 +9,6 @@ This project provides an enterprise-ready conversational interface for Siemens T
 
 ---
 
-## 📷 Application Screenshots
-
-### Login Screen
-![Login Screen](docs/screenshots/login.png)
-
-### AI Copilot
-![AI Copilot](docs/screenshots/copilot.png)
-
-### Dashboard
-![Dashboard](docs/screenshots/dashboard.png)
-
-### User Management
-![User Management](docs/screenshots/user-management.png)
-
-### MCP Explorer
-![MCP Explorer](docs/screenshots/mcp-explorer.png)
-
----
 
 ## ✨ Features
 

@@ -16,28 +16,6 @@ This project demonstrates **conversational engineering**: bringing natural langu
 
 ---
 
-## 📷 Application Screenshots
-
-### Login Screen
-![Login Screen](docs/screenshots/login.png)
-
-### AI Copilot
-![AI Copilot](docs/screenshots/copilot.png)
-
-### Dashboard
-![Dashboard](docs/screenshots/dashboard.png)
-
-### User Management
-![User Management](docs/screenshots/user-management.png)
-
-### MCP Explorer
-![MCP Explorer](docs/screenshots/mcp-explorer.png)
-
-### Security Logs
-![Security Logs](docs/screenshots/security-logs.png)
-
----
-
 ## ✨ Features
 
 * **AI Copilot**: Natural language conversational assistant utilizing dynamic routing for instant local heuristics responses, Teamcenter operations, or general-purpose questions.

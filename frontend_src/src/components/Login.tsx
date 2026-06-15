@@ -104,7 +104,7 @@ export function Login() {
                 minLength={3}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-on-surface focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full"
+                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-white/95 placeholder-white/45 focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full caret-secondary-fixed-dim"
               />
             </div>
             <div className="form-group flex flex-col gap-1.5">
@@ -116,7 +116,7 @@ export function Login() {
                 minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-on-surface focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full"
+                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-white/95 placeholder-white/45 focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full caret-secondary-fixed-dim"
               />
             </div>
             <button
@@ -138,7 +138,7 @@ export function Login() {
                 minLength={3}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-on-surface focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full"
+                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-white/95 placeholder-white/45 focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full caret-secondary-fixed-dim"
               />
             </div>
             <div className="form-group flex flex-col gap-1.5">
@@ -150,7 +150,7 @@ export function Login() {
                 minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-on-surface focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full"
+                className="bg-background/80 border border-outline-variant/30 text-xs rounded-lg p-2.5 text-white/95 placeholder-white/45 focus:border-secondary-fixed-dim focus:ring-1 focus:ring-secondary-fixed-dim outline-none w-full caret-secondary-fixed-dim"
               />
             </div>
             <button

@@ -14,6 +14,124 @@
   --transition-fast: 0.15s;
   --transition-normal: 0.25s;
   --transition-slow: 0.4s;
+
+  /* Custom theme color variables (Dark Theme - default) */
+  --color-inverse-primary: #515f78;
+  --color-on-primary-fixed-variant: #39475f;
+  --color-surface-tint: #b9c7e4;
+  --color-on-tertiary: #00390a;
+  --color-on-secondary-fixed-variant: #004f54;
+  --color-on-primary: #233148;
+  --color-secondary-container: #00f1fe;
+  --color-on-surface: #e0e3e6;
+  --color-on-surface-variant: #c5c6cd;
+  --color-primary-fixed: #d6e3ff;
+  --color-inverse-on-surface: #2d3133;
+  --color-secondary-fixed: #74f5ff;
+  --color-inverse-surface: #e0e3e6;
+  --color-surface-container-low: #191c1e;
+  --color-on-primary-container: #74829d;
+  --color-background: #101416;
+  --color-tertiary-fixed: #94f990;
+  --color-on-primary-fixed: #0d1c32;
+  --color-on-secondary: #00363a;
+  --color-on-secondary-fixed: #002022;
+  --color-primary-fixed-dim: #b9c7e4;
+  --color-on-tertiary-container: #309539;
+  --color-tertiary: #78dc77;
+  --color-surface-bright: #363a3c;
+  --color-secondary-fixed-dim: #00dbe7;
+  --color-primary: #b9c7e4;
+  --color-outline: #8f9097;
+  --color-surface-container-lowest: #0b0f11;
+  --color-primary-container: #0a192f;
+  --color-surface-container: #1d2022;
+  --color-on-background: #e0e3e6;
+  --color-surface-variant: #323538;
+  --color-tertiary-fixed-dim: #78dc77;
+  --color-secondary: #ddfcff;
+  --color-surface-container-high: #272a2d;
+  --color-surface-dim: #101416;
+  --color-on-error-container: #ffdad6;
+  --color-error-container: #93000a;
+  --color-on-error: #690005;
+  --color-on-tertiary-fixed-variant: #005313;
+  --color-surface-container-highest: #323538;
+  --color-surface: #101416;
+  --color-outline-variant: #44474d;
+  --color-error: #ffb4ab;
+  --color-on-tertiary-fixed: #002204;
+  --color-on-secondary-container: #006a70;
+  --color-tertiary-container: #001f03;
+
+  /* Glassmorphism variables */
+  --color-glass-panel: rgba(17, 34, 64, 0.7);
+  --color-glass-card: rgba(17, 34, 64, 0.45);
+  --color-glass-border: rgba(255, 255, 255, 0.05);
+
+  /* Code block variables */
+  --color-code-text: #74f5ff;
+  --color-code-bg: rgba(255, 255, 255, 0.1);
+}
+
+/* Light Theme Variables */
+.light-theme {
+  --color-inverse-primary: #a3b2cc;
+  --color-on-primary-fixed-variant: #4a5975;
+  --color-surface-tint: #1e3a8a;
+  --color-on-tertiary: #ffffff;
+  --color-on-secondary-fixed-variant: #ccfbf1;
+  --color-on-primary: #ffffff;
+  --color-secondary-container: #ccfbf1;
+  --color-on-surface: #0f172a;
+  --color-on-surface-variant: #475569;
+  --color-primary-fixed: #dbeafe;
+  --color-inverse-on-surface: #f8fafc;
+  --color-secondary-fixed: #ccfbf1;
+  --color-inverse-surface: #0f172a;
+  --color-surface-container-low: #f8fafc;
+  --color-on-primary-container: #1e3a8a;
+  --color-background: #f8fafc;
+  --color-tertiary-fixed: #dcfce7;
+  --color-on-primary-fixed: #172554;
+  --color-on-secondary: #ffffff;
+  --color-on-secondary-fixed: #115e59;
+  --color-primary-fixed-dim: #3b82f6;
+  --color-on-tertiary-container: #14532d;
+  --color-tertiary: #166534;
+  --color-surface-bright: #ffffff;
+  --color-secondary-fixed-dim: #0d9488;
+  --color-primary: #1e40af;
+  --color-outline: #94a3b8;
+  --color-surface-container-lowest: #ffffff;
+  --color-primary-container: #dbeafe;
+  --color-surface-container: #f1f5f9;
+  --color-on-background: #0f172a;
+  --color-surface-variant: #cbd5e1;
+  --color-tertiary-fixed-dim: #15803d;
+  --color-secondary: #0369a1;
+  --color-surface-container-high: #e2e8f0;
+  --color-surface-dim: #f1f5f9;
+  --color-on-error-container: #7f1d1d;
+  --color-error-container: #fee2e2;
+  --color-on-error: #ffffff;
+  --color-on-tertiary-fixed-variant: #dcfce7;
+  --color-surface-container-highest: #cbd5e1;
+  --color-surface: #ffffff;
+  --color-outline-variant: #e2e8f0;
+  --color-error: #b91c1c;
+  --color-on-tertiary-fixed: #14532d;
+  --color-on-secondary-container: #115e59;
+  --color-tertiary-container: #dcfce7;
+
+  /* Glassmorphism variables */
+  --color-glass-panel: rgba(255, 255, 255, 0.7);
+  --color-glass-card: rgba(255, 255, 255, 0.45);
+  --color-glass-border: rgba(15, 23, 42, 0.08);
+
+  /* Code block variables */
+  --color-code-text: #0f766e;
+  --color-code-bg: rgba(15, 118, 110, 0.1);
 }
 
 /* Material Symbols Outlined Custom Settings */
@@ -24,17 +142,17 @@
 
 /* Glassmorphism Styles */
 .glass-panel {
-  background: rgba(17, 34, 64, 0.7);
+  background: var(--color-glass-panel);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--color-glass-border);
 }
 
 .glass-card {
-  background: rgba(17, 34, 64, 0.45);
+  background: var(--color-glass-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--color-glass-border);
 }
 
 /* AI Highlight & Glow Effects */
@@ -57,16 +175,16 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #101416;
+  background: var(--color-background);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #323538;
+  background: var(--color-outline-variant);
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #8f9097;
+  background: var(--color-outline);
 }
 
 /* Terminal Log Specific Scrollbar */
@@ -109,8 +227,8 @@
 
 /* Layout Utilities */
 body {
-  background-color: #101416;
-  color: #e0e3e6;
+  background-color: var(--color-background);
+  color: var(--color-on-background);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -126,13 +244,13 @@ body {
 .markdown-body h2, 
 .markdown-body h3, 
 .markdown-body h4 {
-  color: #e0e3e6;
+  color: var(--color-on-background);
   font-weight: 600;
   margin-top: 16px;
   margin-bottom: 8px;
 }
 
-.markdown-body h1 { font-size: 1.25rem; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 4px; }
+.markdown-body h1 { font-size: 1.25rem; border-bottom: 1px solid var(--color-outline-variant); padding-bottom: 4px; }
 .markdown-body h2 { font-size: 1.15rem; }
 .markdown-body h3 { font-size: 1.05rem; }
 .markdown-body h4 { font-size: 1.0rem; }
@@ -145,22 +263,22 @@ body {
 }
 
 .markdown-body strong {
-  color: #e0e3e6;
+  color: var(--color-on-background);
   font-weight: 600;
 }
 
 .markdown-body code {
   font-family: var(--font-mono);
-  background-color: rgba(255, 255, 255, 0.1);
-  color: #74f5ff;
+  background-color: var(--color-code-bg);
+  color: var(--color-code-text);
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 0.9em;
 }
 
 .markdown-body pre {
-  background-color: #0b0f11;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background-color: var(--color-surface-container-lowest);
+  border: 1px solid var(--color-outline-variant);
   border-radius: 8px;
   padding: 12px 16px;
   overflow-x: auto;
@@ -172,7 +290,7 @@ body {
   background-color: transparent;
   padding: 0;
   border-radius: 0;
-  color: #c5c6cd;
+  color: var(--color-on-surface-variant);
   font-size: 13px;
   display: block;
 }
@@ -205,18 +323,18 @@ body {
 
 .markdown-body th, 
 .markdown-body td {
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--color-outline-variant);
   padding: 8px 12px;
   text-align: left;
 }
 
 .markdown-body th {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: var(--color-surface-container-lowest);
 }
 
 .markdown-body blockquote {
-  border-left: 4px solid #00f1fe;
-  background-color: rgba(0, 241, 254, 0.05);
+  border-left: 4px solid var(--color-secondary-fixed-dim);
+  background-color: rgba(0, 219, 231, 0.05);
   padding: 8px 16px;
   margin: 12px 0;
   border-radius: 0 4px 4px 0;
@@ -263,9 +381,12 @@ body {
 /* Tab active styles */
 .tab-link-active {
   color: #00dbe7 !important;
-  background-color: rgba(0, 241, 254, 0.08) !important;
+  background-color: rgba(0, 241, 254, 0.06) !important;
   font-weight: 700;
-  border-right: 2px solid #00dbe7;
+  border-left: 3px solid #00dbe7 !important;
+  border-right: none !important;
+  box-shadow: inset 6px 0 12px rgba(0, 219, 231, 0.04), 0 0 8px rgba(0, 219, 231, 0.08) !important;
+  transition: all 0.15s ease-in-out;
 }
 
 /* Custom loader animation */
@@ -278,4 +399,102 @@ body {
 @keyframes loader-dot-bounce {
   0%, 80%, 100% { transform: scale(0); }
   40% { transform: scale(1.0); }
+}
+
+/* Flyout menu slide in animation */
+.flyout-slide-in {
+  animation: flyoutSlideIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes flyoutSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ==========================================================================
+   AUTH SCREEN ACCESSIBILITY, THEME CONTROL & CONTRAST FIXES
+   ========================================================================== */
+
+/* Force dark theme variables on the auth container to prevent theme-bleed from light-theme settings */
+.auth-container {
+  --color-background: #101416 !important;
+  --color-glass-panel: rgba(17, 34, 64, 0.7) !important;
+  --color-on-surface: #e0e3e6 !important;
+  --color-on-surface-variant: #c5c6cd !important;
+  --color-secondary-fixed-dim: #00dbe7 !important;
+  --color-outline-variant: #44474d !important;
+}
+
+/* High-contrast and theme-stable styles for login form inputs */
+.auth-container input {
+  background: #0b1220 !important;
+  color: #f8fafc !important;
+  -webkit-text-fill-color: #f8fafc !important;
+  caret-color: #00dbe7 !important;
+  opacity: 1 !important;
+}
+
+/* Visually distinct placeholder text */
+.auth-container input::placeholder {
+  color: rgba(255, 255, 255, 0.45) !important;
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.45) !important;
+}
+
+/* Ensure caret/cursor color remains visible and clear */
+.auth-container input:focus {
+  caret-color: #00dbe7 !important;
+  color: #f8fafc !important;
+  -webkit-text-fill-color: #f8fafc !important;
+}
+
+/* Override browser autofill styles to maintain dark theme background & high-contrast text */
+.auth-container input:-webkit-autofill,
+.auth-container input:-webkit-autofill:hover,
+.auth-container input:-webkit-autofill:focus,
+.auth-container input:-webkit-autofill:active {
+  -webkit-text-fill-color: #f8fafc !important;
+  -webkit-box-shadow: 0 0 0px 1000px #0b1220 inset !important;
+  box-shadow: 0 0 0px 1000px #0b1220 inset !important;
+  transition: background-color 9999s ease-in-out 0s;
+  caret-color: #00dbe7 !important;
+}
+
+/* ==========================================================================
+   TOAST NOTIFICATION ANIMATIONS & TRANSITIONS
+   ========================================================================== */
+
+@keyframes toastShow {
+  from {
+    opacity: 0;
+    transform: translateY(-1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toastHide {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-1rem);
+  }
+}
+
+.animate-toast-show {
+  animation: toastShow 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-toast-hide {
+  animation: toastHide 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }

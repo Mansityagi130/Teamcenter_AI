@@ -28,5 +28,21 @@
     "state": "AWAITING_DETAILS",
     "data": {},
     "previous_state": null
+  },
+  "session_test_1781525533": {
+    "state": "AWAITING_DETAILS",
+    "data": {
+      "item_id": "ITEM_25546",
+      "revision_option": "1"
+    },
+    "previous_state": null,
+    "updated_at": "2026-06-15T12:12:26.814238",
+    "pendingAction": "AWAITING_DETAILS",
+    "currentWorkflow": "CreateItem",
+    "currentField": null,
+    "collectedData": {
+      "item_id": "ITEM_25546",
+      "revision_option": "1"
+    }
   }
 }

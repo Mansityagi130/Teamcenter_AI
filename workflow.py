@@ -6,13 +6,14 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
+from services.database import get_database_path
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("workflow")
 
 BASE_DIR = Path(__file__).parent.resolve()
-DB_FILE = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "teamcenter.db")))
+DB_FILE = get_database_path()
 DATA_FILE = Path(os.getenv("DATA_FILE_PATH", str(BASE_DIR / "data" / "items.csv")))
 if not DATA_FILE.exists() and not os.getenv("DATA_FILE_PATH"):
     DATA_FILE = BASE_DIR / "Data" / "items.csv"

@@ -1,11 +1,38 @@
-.env
+# Dependencies
 node_modules/
-dist/
-venv/
-__pycache__/
-*.db
-*.log
-frontend_src/dist/
 frontend_src/node_modules/
+
+# Production builds
+dist/
+build/
+frontend_src/dist/
+
+# Local Environment Variables & Secrets
+.env
+.env.local
+.env.production
 supabase_key.txt
+
+# Databases
+*.db
+teamcenter.db
+
+# Logs and runtime files
+logs/
+*.log
+
+# Python cache & environments
+__pycache__/
+*.pyc
+venv/
+.python-version
+
+# IDE configurations
+.vscode/
+.idea/
 .continue/
+
+# Backup & temporary files
+*.bak
+*.tmp
+temp/

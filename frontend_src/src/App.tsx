@@ -11,6 +11,15 @@ import { Search } from './components/Search';
 import { Security } from './components/Security';
 import { Settings } from './components/Settings';
 import { ToastContainer } from './components/Toast';
+import { TeamcenterCommandCenter } from './components/TeamcenterCommandCenter';
+import { TeamcenterConsolePage } from './components/TeamcenterConsolePage';
+import { ApiExplorerPage } from './components/ApiExplorerPage';
+import { AdvancedSearchPage } from './components/AdvancedSearchPage';
+import { PropertyInspectorPage } from './components/PropertyInspectorPage';
+import { TeamcenterHealthDashboard } from './components/TeamcenterHealthDashboard';
+import { McpToolExplorer } from './components/McpToolExplorer';
+import { Observability } from './components/Observability';
+import { SystemArchitectureDashboard } from './components/SystemArchitectureDashboard';
 
 // Component wrapper to sync routing with Layout view state
 function AppContent() {
@@ -27,6 +36,7 @@ function AppContent() {
           dispatch(setProfile({
             role: res.data.role || 'Chief Engineer',
             createdAt: res.data.created_at,
+            permissions: res.data.permissions || [],
           }));
         })
         .catch(() => {
@@ -59,6 +69,15 @@ function AppContent() {
     <Layout currentView={currentView} onNavigate={handleNavigate}>
       <Routes>
         <Route path="/dashboard" element={<Dashboard onNavigate={handleNavigate} />} />
+        <Route path="/teamcenter" element={<TeamcenterCommandCenter onNavigate={handleNavigate} />} />
+        <Route path="/teamcenter-console" element={<TeamcenterConsolePage onNavigate={handleNavigate} />} />
+        <Route path="/api-explorer" element={<ApiExplorerPage onNavigate={handleNavigate} />} />
+        <Route path="/teamcenter/search" element={<AdvancedSearchPage onNavigate={handleNavigate} />} />
+        <Route path="/teamcenter/properties" element={<PropertyInspectorPage onNavigate={handleNavigate} />} />
+        <Route path="/teamcenter/health" element={<TeamcenterHealthDashboard onNavigate={handleNavigate} />} />
+        <Route path="/architecture" element={<SystemArchitectureDashboard onNavigate={handleNavigate} />} />
+        <Route path="/logs" element={<Observability />} />
+        <Route path="/mcp" element={<McpToolExplorer onNavigate={handleNavigate} />} />
         <Route path="/copilot" element={<Copilot />} />
         <Route path="/search" element={<Search />} />
         <Route path="/security" element={<Security />} />

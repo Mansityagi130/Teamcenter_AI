@@ -1,0 +1,16 @@
+[
+  {
+    "item_id": "VALVE_100",
+    "item_name": "Demo Valve 100",
+    "item_description": "Demo first valve",
+    "revision_id": "A",
+    "createdAt": "2026-01-01 00:00:00"
+  },
+  {
+    "item_id": "PUMP_200",
+    "item_name": "Demo Pump 200",
+    "item_description": "Demo pump assembly",
+    "revision_id": "A",
+    "createdAt": "2026-02-01 00:00:00"
+  }
+]

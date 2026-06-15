@@ -1,17 +1,30 @@
 <!DOCTYPE html>
-<html class="dark" lang="en">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Teamcenter PLM AI Assistant</title>
   
+  <script>
+    (function() {
+      const savedTheme = localStorage.getItem('theme') || 'dark';
+      if (savedTheme === 'light') {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.classList.add('light-theme');
+      } else {
+        document.documentElement.classList.add('dark');
+        document.documentElement.classList.remove('light-theme');
+      }
+    })();
+  </script>
+
   <!-- Material Symbols Outlined & Google Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <script type="module" crossorigin src="/static/assets/index-kghEme-x.js"></script>
-  <link rel="stylesheet" crossorigin href="/static/assets/index-C1ddaXGt.css">
+  <script type="module" crossorigin src="/static/assets/index-BHVCjflM.js"></script>
+  <link rel="stylesheet" crossorigin href="/static/assets/index-CTRjXKCc.css">
 </head>
-<body class="bg-background text-on-background overflow-hidden dark">
+<body class="bg-background text-on-background overflow-hidden">
   <div id="root"></div>
   <!-- Markdown-it parser Library (loaded globally to match standard parsing) -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>

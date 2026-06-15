@@ -16,6 +16,7 @@ interface AuthState {
   isAuthenticated: boolean;
   role: string;
   createdAt: string;
+  permissions: string[];
   health: HealthState;
 }
 
@@ -26,6 +27,7 @@ const initialAuthState: AuthState = {
   isAuthenticated: !!localStorage.getItem('teamcenter.jwt'),
   role: 'Chief Engineer',
   createdAt: '',
+  permissions: [],
   health: {
     backend: 'offline',
     api: 'offline',
@@ -52,14 +54,16 @@ const authSlice = createSlice({
       state.username = '';
       state.isAuthenticated = false;
       state.createdAt = '';
+      state.permissions = [];
       localStorage.removeItem('teamcenter.jwt');
       localStorage.removeItem('teamcenter.apiKey');
       localStorage.removeItem('teamcenter.username');
       localStorage.removeItem('teamcenter.currentSessionId');
     },
-    setProfile(state, action: PayloadAction<{ role: string; createdAt: string }>) {
+    setProfile(state, action: PayloadAction<{ role: string; createdAt: string; permissions?: string[] }>) {
       state.role = action.payload.role;
       state.createdAt = action.payload.createdAt;
+      state.permissions = action.payload.permissions || [];
     },
     updateHealth(state, action: PayloadAction<Partial<HealthState>>) {
       state.health = { ...state.health, ...action.payload };
@@ -76,12 +80,14 @@ export interface ChatMessage {
   message: string;
   timestamp: string;
   isStreaming?: boolean;
+  tool_calls?: any[];
 }
 
 export interface ChatSession {
   session_id: string;
   title: string;
   created_at?: string;
+  last_active?: string;
   is_unsaved?: boolean;
 }
 
@@ -148,7 +154,7 @@ const chatsSlice = createSlice({
     addMessage(state, action: PayloadAction<ChatMessage>) {
       state.messages.push(action.payload);
     },
-    updateLastAssistantMessage(state, action: PayloadAction<{ message: string; isStreaming?: boolean }>) {
+    updateLastAssistantMessage(state, action: PayloadAction<{ message: string; isStreaming?: boolean; tool_calls?: any[] }>) {
       let last: ChatMessage | null = null;
       for (let i = state.messages.length - 1; i >= 0; i--) {
         if (state.messages[i].sender === 'assistant') {
@@ -160,6 +166,9 @@ const chatsSlice = createSlice({
         last.message = action.payload.message;
         if (action.payload.isStreaming !== undefined) {
           last.isStreaming = action.payload.isStreaming;
+        }
+        if (action.payload.tool_calls !== undefined) {
+          last.tool_calls = action.payload.tool_calls;
         }
       }
     },
@@ -297,6 +306,9 @@ const notificationsSlice = createSlice({
       state.history = [];
       state.unreadCount = 0;
     },
+    clearToasts(state) {
+      state.toastQueue = [];
+    },
   },
 });
 
@@ -314,7 +326,7 @@ export const {
   setAttachedFile,
 } = chatsSlice.actions;
 export const { setSettings, setModel, setEnv, setUsage } = settingsSlice.actions;
-export const { addToast, removeToast, markAllRead, clearNotifications } = notificationsSlice.actions;
+export const { addToast, removeToast, markAllRead, clearNotifications, clearToasts } = notificationsSlice.actions;
 
 // Configure store
 export const store = configureStore({

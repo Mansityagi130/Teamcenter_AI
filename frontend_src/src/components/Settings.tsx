@@ -1,13 +1,30 @@
 import React, { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import apiClient from '../api';
-import { RootState, addToast, setSettings, setEnv, setModel, addTerminalLog } from '../store';
+import { RootState, addToast, setSettings, setEnv, setModel, addTerminalLog, setProfile } from '../store';
 
 export function Settings() {
   const settings = useSelector((state: RootState) => state.settings);
   const username = useSelector((state: RootState) => state.auth.username);
   const createdAt = useSelector((state: RootState) => state.auth.createdAt);
+  const role = useSelector((state: RootState) => state.auth.role);
+  const permissions = useSelector((state: RootState) => state.auth.permissions || []);
   const dispatch = useDispatch();
+
+  // Tab State
+  const [activeTab, setActiveTab] = useState<'config' | 'users'>('config');
+
+  // User Management State
+  const [adminUsers, setAdminUsers] = useState<any[]>([]);
+  const [masterPermissions, setMasterPermissions] = useState<any[]>([]);
+  const [masterRoles, setMasterRoles] = useState<string[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState<boolean>(false);
+  const [savingUser, setSavingUser] = useState<string | null>(null);
+
+  // Modal State
+  const [showModal, setShowModal] = useState<boolean>(false);
+  const [modalUser, setModalUser] = useState<any | null>(null);
+  const [modalPermissions, setModalPermissions] = useState<string[]>([]);
 
   // Local state for forms
   const [openaiKey, setOpenaiKey] = useState('');
@@ -16,6 +33,7 @@ export function Settings() {
   const [tcUser, setTcUser] = useState('');
   const [tcPass, setTcPass] = useState('');
   
+  const [demoConfig, setDemoConfig] = useState<any>({ demo_mode: false, latency_ms: 0, error_rate: 0, timeout_rate: 0, slow_network_ms: 0, expired_session_rate: 0 });
   const [visibility, setVisibility] = useState<Record<string, boolean>>({
     openai: false,
     claude: false,
@@ -34,6 +52,13 @@ export function Settings() {
       dispatch(setSettings(data));
       
       setOpenaiKey(data.openai_key);
+      // fetch demo config
+      try {
+        const demoRes = await apiClient.get('/api/demo/status');
+        setDemoConfig(demoRes.data || demoConfig);
+      } catch (e) {
+        // ignore
+      }
       setClaudeKey(data.claude_key);
       setGeminiKey(data.gemini_key);
       setTcUser(data.tc_user);
@@ -73,6 +98,110 @@ export function Settings() {
       dispatch(addToast({ message: err.message || 'Failed to save settings', type: 'error' }));
     }
   }
+
+  async function fetchUsersList() {
+    setLoadingUsers(true);
+    try {
+      const res = await apiClient.get('/api/admin/users');
+      setAdminUsers(res.data.users || []);
+      setMasterPermissions(res.data.master_permissions || []);
+      setMasterRoles(res.data.master_roles || []);
+    } catch (err: any) {
+      dispatch(addToast({ message: err.response?.data?.detail || err.message || 'Failed to load users', type: 'error' }));
+    } finally {
+      setLoadingUsers(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'users') {
+      fetchUsersList();
+    }
+  }, [activeTab]);
+
+  function openPermissionModal(user: any) {
+    setModalUser(user);
+    setModalPermissions([...user.permissions]);
+    setShowModal(true);
+  }
+
+  function handleModalPermissionToggle(key: string, checked: boolean) {
+    if (checked) {
+      setModalPermissions((prev) => [...prev, key]);
+    } else {
+      setModalPermissions((prev) => prev.filter((p) => p !== key));
+    }
+  }
+
+  function closePermissionModal() {
+    setShowModal(false);
+    setModalUser(null);
+    setModalPermissions([]);
+  }
+
+  function saveModalPermissions() {
+    if (modalUser) {
+      setAdminUsers((prev) =>
+        prev.map((u) => {
+          if (u.username === modalUser.username) {
+            return { ...u, permissions: modalPermissions };
+          }
+          return u;
+        })
+      );
+    }
+    closePermissionModal();
+  }
+
+  function handleRoleChange(uname: string, nextRole: string) {
+    setAdminUsers((prev) =>
+      prev.map((u) => {
+        if (u.username === uname) {
+          return { ...u, role: nextRole };
+        }
+        return u;
+      })
+    );
+  }
+
+  async function handleSaveUserChanges(user: any) {
+    setSavingUser(user.username);
+    try {
+      await apiClient.post('/api/admin/user/permissions', {
+        username: user.username,
+        role: user.role,
+        permissions: user.permissions,
+      });
+      dispatch(addToast({ message: `Successfully updated permissions for user '${user.username}'.`, type: 'success' }));
+      
+      // If we edited ourselves, refresh the current profile in Redux instantly
+      if (user.username.toLowerCase() === username.toLowerCase()) {
+        const profileRes = await apiClient.get('/user/profile');
+        dispatch(
+          setProfile({
+            role: profileRes.data.role || 'Chief Engineer',
+            createdAt: profileRes.data.created_at,
+            permissions: profileRes.data.permissions || [],
+          })
+        );
+      }
+      fetchUsersList();
+    } catch (err: any) {
+      dispatch(addToast({ message: err.response?.data?.detail || err.message || 'Failed to update permissions', type: 'error' }));
+    } finally {
+      setSavingUser(null);
+    }
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && showModal) {
+        closePermissionModal();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showModal]);
 
   async function handlePasswordReset(e: React.FormEvent) {
     e.preventDefault();
@@ -129,23 +258,54 @@ export function Settings() {
     dispatch(addToast({ message: `Switched target environment to ${env.toUpperCase()}`, type: 'warning' }));
   }
 
+  const canManageUsers = permissions.includes('MANAGE_USERS');
+
   return (
     <div className="absolute inset-0 overflow-y-auto p-gutter space-y-gutter w-full h-full fade-in-slide bg-background">
-      <div className="pb-sm border-b border-outline-variant/10 flex justify-between items-end">
+      <div className="pb-sm border-b border-outline-variant/10 flex flex-col md:flex-row justify-between items-start md:items-end gap-md">
         <div>
-          <h2 className="font-headline-lg text-xl md:text-2xl text-on-surface">System Configuration Panel</h2>
-          <p className="text-on-surface-variant text-xs mt-0.5">Manage your industrial deployment credentials, passwords, and model API key configurations.</p>
+          <h2 className="font-headline-lg text-xl md:text-2xl text-on-surface">
+            {activeTab === 'config' ? 'System Configuration Panel' : 'User Permission Settings'}
+          </h2>
+          <p className="text-on-surface-variant text-xs mt-0.5">
+            {activeTab === 'config'
+              ? 'Manage your industrial deployment credentials, passwords, and model API key configurations.'
+              : 'Grant and revoke system permissions and modify user roles dynamically.'}
+          </p>
         </div>
-        <button
-          type="button"
-          onClick={handleSaveSettings}
-          className="bg-secondary-fixed-dim text-primary-container px-5 py-2 rounded-lg font-bold hover:brightness-110 active:scale-95 transition-all text-xs flex items-center gap-1.5 shadow-md cyan-glow outline-none"
-        >
-          <span className="material-symbols-outlined text-sm">save</span> Apply Configuration Changes
-        </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          {canManageUsers && (
+            <div className="flex bg-surface-container-low p-1 rounded-xl border border-outline-variant/20 text-xs font-bold">
+              <button
+                type="button"
+                className={`px-4 py-1.5 rounded-lg transition-all outline-none flex items-center gap-1 ${activeTab === 'config' ? 'bg-secondary-container/20 text-secondary-fixed-dim' : 'text-on-surface-variant hover:text-on-surface'}`}
+                onClick={() => setActiveTab('config')}
+              >
+                <span className="material-symbols-outlined text-sm">settings</span> General Config
+              </button>
+              <button
+                type="button"
+                className={`px-4 py-1.5 rounded-lg transition-all outline-none flex items-center gap-1 ${activeTab === 'users' ? 'bg-secondary-container/20 text-secondary-fixed-dim' : 'text-on-surface-variant hover:text-on-surface'}`}
+                onClick={() => setActiveTab('users')}
+              >
+                <span className="material-symbols-outlined text-sm">group</span> User Management
+              </button>
+            </div>
+          )}
+          {activeTab === 'config' && (
+            <button
+              type="button"
+              onClick={handleSaveSettings}
+              className="bg-secondary-fixed-dim text-primary-container px-5 py-2 rounded-lg font-bold hover:brightness-110 active:scale-95 transition-all text-xs flex items-center gap-1.5 shadow-md cyan-glow outline-none"
+            >
+              <span className="material-symbols-outlined text-sm">save</span> Apply Configuration Changes
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-gutter">
+      {activeTab === 'config' && (
+        <div className="grid grid-cols-12 gap-gutter">
         {/* Left Side selectors */}
         <div className="col-span-12 lg:col-span-4 space-y-gutter">
           {/* Environment */}
@@ -412,7 +572,7 @@ export function Settings() {
               </div>
               <div className="flex justify-between py-1 border-b border-outline-variant/10">
                 <span className="text-on-surface-variant">User Role status:</span>
-                <strong className="text-on-surface">Chief Engineer</strong>
+                <strong className="text-on-surface">{role || '-'}</strong>
               </div>
               <div className="flex justify-between py-1 border-b border-outline-variant/10">
                 <span className="text-on-surface-variant">Account created timestamp:</span>
@@ -424,6 +584,146 @@ export function Settings() {
           </div>
         </div>
       </div>
+      )}
+
+      {activeTab === 'users' && (
+        <div className="glass-card rounded-xl p-5 border border-outline-variant/10 max-w-5xl mx-auto">
+          <div className="flex justify-between items-center mb-4 pb-2 border-b border-outline-variant/10">
+            <div>
+              <h3 className="text-sm font-bold text-on-surface">User Management Panel</h3>
+              <p className="text-on-surface-variant text-[10px] mt-0.5">Edit user system roles and manage explicit authorization credentials.</p>
+            </div>
+            <button
+              onClick={fetchUsersList}
+              className="bg-surface-container-high border border-outline-variant/20 hover:bg-surface-variant text-on-surface py-1.5 px-3 rounded-lg font-semibold transition-all text-xs flex items-center gap-1.5 outline-none"
+            >
+              <span className="material-symbols-outlined text-sm">refresh</span> Refresh List
+            </button>
+          </div>
+          
+          {loadingUsers ? (
+            <div className="text-center py-12 text-xs text-on-surface-variant flex flex-col items-center justify-center gap-2">
+              <span className="material-symbols-outlined animate-spin text-xl text-secondary-fixed-dim">sync</span>
+              <span>Retrieving deployment user registry...</span>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="bg-surface-variant/20 text-on-surface-variant font-bold border-b border-outline-variant/10 uppercase tracking-wider text-[10px]">
+                    <th className="p-3">Username</th>
+                    <th className="p-3">Role Designation</th>
+                    <th className="p-3">System Permissions</th>
+                    <th className="p-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-outline-variant/5 text-on-surface">
+                  {adminUsers.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="p-4 text-center text-on-surface-variant italic">No user accounts found.</td>
+                    </tr>
+                  )}
+                  {adminUsers.map((user) => (
+                    <tr key={user.username} className="hover:bg-surface-variant/20 transition-colors border-b border-outline-variant/5">
+                      <td className="p-3 font-semibold text-on-surface">{user.username}</td>
+                      <td className="p-3">
+                        <select
+                          value={user.role}
+                          onChange={(e) => handleRoleChange(user.username, e.target.value)}
+                          className="bg-background border border-outline-variant/30 rounded-lg text-xs py-1.5 px-2.5 text-on-surface focus:border-secondary-fixed-dim focus:ring-0 outline-none"
+                        >
+                          {masterRoles.map((roleName) => (
+                            <option key={roleName} value={roleName}>{roleName}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="p-3">
+                        <button
+                          type="button"
+                          onClick={() => openPermissionModal(user)}
+                          className="bg-surface-container-high border border-outline-variant/20 hover:bg-surface-variant text-on-surface py-1.5 px-3 rounded-lg font-bold transition-all text-[11px] flex items-center gap-1.5 outline-none"
+                        >
+                          <span className="material-symbols-outlined text-[14px]">key</span>
+                          Manage ({user.permissions.length})
+                        </button>
+                      </td>
+                      <td className="p-3">
+                        <button
+                          type="button"
+                          onClick={() => handleSaveUserChanges(user)}
+                          disabled={savingUser === user.username}
+                          className="bg-secondary-fixed-dim text-primary-container px-4 py-1.5 rounded-lg font-bold hover:brightness-110 active:scale-95 disabled:opacity-50 transition-all text-[11px] flex items-center gap-1.5 shadow-md outline-none"
+                        >
+                          <span className="material-symbols-outlined text-[13px]">save</span>
+                          {savingUser === user.username ? 'Saving...' : 'Save'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {showModal && modalUser && (
+        <div 
+          className="fixed inset-0 bg-background/80 backdrop-blur-sm z-[999] flex items-center justify-center p-4 cursor-pointer"
+          onClick={(e) => e.target === e.currentTarget && closePermissionModal()}
+        >
+          <div className="glass-panel p-6 rounded-xl space-y-4 max-w-md w-full border border-outline-variant/20 shadow-2xl cursor-default">
+            <h3 className="text-sm font-bold text-on-surface flex items-center gap-1.5 border-b border-outline-variant/10 pb-2">
+              <span className="material-symbols-outlined text-secondary-fixed-dim text-lg">shield_person</span>
+              System Permissions for {modalUser.username}
+            </h3>
+            
+            <p className="text-[11px] text-on-surface-variant leading-relaxed">
+              Enable or disable specific resource privileges for this user. These changes will update immediately after saving.
+            </p>
+
+            <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+              {masterPermissions.map((perm) => {
+                const checked = modalPermissions.includes(perm.key);
+                return (
+                  <label 
+                    key={perm.key} 
+                    className="flex items-start gap-3 p-2 bg-surface-container-low rounded-lg hover:bg-surface-container-high cursor-pointer transition-all border border-outline-variant/5 hover:border-secondary-fixed-dim/20"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => handleModalPermissionToggle(perm.key, e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded bg-background border border-outline-variant/30 text-secondary-fixed-dim focus:ring-0 outline-none cursor-pointer"
+                    />
+                    <div className="text-xs">
+                      <div className="font-bold text-on-surface">{perm.key.replace(/_/g, ' ')}</div>
+                      <div className="text-on-surface-variant text-[10px] mt-0.5">{perm.description}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="flex justify-end gap-sm pt-2 border-t border-outline-variant/10">
+              <button
+                type="button"
+                onClick={closePermissionModal}
+                className="px-3 py-1.5 text-xs bg-surface-variant text-on-surface font-semibold rounded-lg hover:bg-outline-variant/20 transition-all outline-none"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveModalPermissions}
+                className="px-4 py-1.5 text-xs bg-secondary-fixed-dim text-primary-container font-bold rounded-lg hover:brightness-110 active:scale-95 transition-all outline-none"
+              >
+                Apply Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

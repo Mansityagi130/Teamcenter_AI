@@ -1,0 +1,15 @@
+[
+  {
+    "item_id": "VALVE_100",
+    "components": [
+      {
+        "item_id": "SPRING_1",
+        "qty": 2
+      },
+      {
+        "item_id": "SEAL_1",
+        "qty": 1
+      }
+    ]
+  }
+]

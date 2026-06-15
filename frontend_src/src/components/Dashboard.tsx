@@ -1,20 +1,186 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { RootState } from '../store';
+import apiClient from '../api';
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
 }
 
+interface ActivityLog {
+  action: string;
+  endpoint: string;
+  timestamp: string;
+}
+
+interface Metrics {
+  total_requests: number;
+  error_rate: number;
+  average_latency_ms: number;
+  active_sessions: number;
+  top_mcp_tools: Array<{ tool_name: string; usage_count: number; success_rate: number; avg_execution_time: number }>;
+  teamcenter_usage: { request_count: number; error_rate: number; average_latency_ms: number };
+}
+
+interface TrendPoint {
+  bucket: string;
+  request_count: number;
+  error_count: number;
+  average_latency_ms: number;
+}
+
+interface ErrorLog {
+  timestamp: string;
+  message: string;
+  service: string;
+  status_code: number;
+  method: string;
+  endpoint: string;
+}
+
+function formatActivityDescription(action: string, endpoint: string) {
+  if (!action) return endpoint || "Unknown Activity";
+  if (action === "chat_message_success") return "Sent message to AI Copilot";
+  if (action === "chat_message_edit_success") return "Edited AI Copilot message";
+  if (action.startsWith("chat_add_item:")) return `AI Tool: Add Item "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("chat_update_item:")) return `AI Tool: Update Item "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("chat_delete_item:")) return `AI Tool: Delete Item "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("chat_search_item:")) return `AI Tool: Search items for "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("chat_add_dataset:")) return `AI Tool: Attach Dataset "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("chat_add_revision:")) return `AI Tool: Create Revision "${action.split(":")[2] || ''}"`;
+  if (action.startsWith("chat_add_workflow:")) return `AI Tool: Initiate Workflow "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("item_add")) return "Created item in Teamcenter";
+  if (action.startsWith("item_update:")) return `Modified item "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("item_delete:")) return `Removed item "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("item_search")) return "Searched Teamcenter database";
+  if (action.startsWith("workflow_add:")) return `Initiated workflow process "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("workflow_approve:")) return `Approved workflow "${action.split(":")[1] || ''}"`;
+  if (action.startsWith("login")) return "User logged in";
+  if (action.startsWith("signup")) return "New user registered";
+  if (action.startsWith("update_settings_success")) return "Modified user settings";
+  if (action.startsWith("rename_session")) return "Renamed chat session";
+  return action.replace(/_/g, ' ');
+}
+
+function getActivityDepartment(endpoint: string) {
+  if (!endpoint) return "System";
+  if (endpoint.includes("/chat") || endpoint.includes("/api/chat")) return "AI Assistant";
+  if (endpoint.includes("/item")) return "Engineering";
+  if (endpoint.includes("/dataset") || endpoint.includes("/revision")) return "Data Control";
+  if (endpoint.includes("/workflow")) return "Operations";
+  if (endpoint.includes("/user")) return "Administration";
+  return "General";
+}
+
+function formatTimestamp(tsStr: string) {
+  if (!tsStr) return "";
+  try {
+    const parts = tsStr.split(' ');
+    if (parts.length < 2) return tsStr;
+    const dateParts = parts[0].split('-');
+    const timeParts = parts[1].split(':');
+    
+    const utcDate = new Date(Date.UTC(
+      parseInt(dateParts[0]),
+      parseInt(dateParts[1]) - 1,
+      parseInt(dateParts[2]),
+      parseInt(timeParts[0]),
+      parseInt(timeParts[1]),
+      parseInt(timeParts[2] || '0')
+    ));
+    
+    const local = new Date(utcDate.getTime());
+    const now = new Date();
+    
+    if (local.toDateString() === now.toDateString()) {
+      return local.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (local.toDateString() === yesterday.toDateString()) {
+      return "Yesterday";
+    }
+    
+    return local.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  } catch {
+    return tsStr;
+  }
+}
+
 export function Dashboard({ onNavigate }: DashboardProps) {
   const username = useSelector((state: RootState) => state.auth.username);
   
+  const [activity, setActivity] = useState<ActivityLog[]>([]);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [trends, setTrends] = useState<TrendPoint[]>([]);
+  const [alerts, setAlerts] = useState<ErrorLog[]>([]);
+  const [totalEvents, setTotalEvents] = useState(1240);
+  const [loading, setLoading] = useState(true);
+
+  async function fetchDashboardData() {
+    try {
+      const [activityRes, metricsRes, trendsRes, errorsRes] = await Promise.all([
+        apiClient.get('/api/logs', { params: { page: 1, limit: 5 } }),
+        apiClient.get('/api/logs/metrics'),
+        apiClient.get('/api/logs/trends', { params: { granularity: 'day' } }),
+        apiClient.get('/api/logs/errors', { params: { page: 1, limit: 3 } })
+      ]);
+
+      if (activityRes.data?.logs) setActivity(activityRes.data.logs);
+      if (activityRes.data?.total) setTotalEvents(activityRes.data.total);
+      if (metricsRes.data) setMetrics(metricsRes.data);
+      if (trendsRes.data?.points) setTrends(trendsRes.data.points);
+      if (errorsRes.data?.logs) setAlerts(errorsRes.data.logs);
+    } catch (err) {
+      console.error("Failed to load dashboard data:", err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchDashboardData();
+    const interval = setInterval(fetchDashboardData, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Compute 7 days chart data
+  const last7Days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    return d;
+  });
+
+  const chartData = last7Days.map(date => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+    
+    const match = trends.find(p => p.bucket && p.bucket.startsWith(dateStr));
+    const count = match ? match.request_count : 0;
+    
+    const weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    return {
+      label: weekdays[date.getDay()],
+      count: count,
+      title: `${weekdays[date.getDay()]} (${month}/${day}): ${count} requests`
+    };
+  });
+
+  const maxCount = Math.max(...chartData.map(d => d.count), 1);
+
+  // Engagement percentages
+  const designPct = metrics ? Math.min(100, Math.max(15, Math.round((metrics.teamcenter_usage.request_count / (metrics.total_requests || 1)) * 100))) : 88;
+  const materialPct = metrics ? Math.min(100, Math.max(10, Math.round((metrics.total_requests - metrics.teamcenter_usage.request_count) / (metrics.total_requests || 1) * 100))) : 62;
+  const manufacturingPct = metrics ? Math.min(100, Math.max(5, Math.round(100 - (metrics.error_rate || 0)))) : 45;
+
   return (
     <div className="absolute inset-0 overflow-y-auto p-gutter space-y-gutter w-full h-full fade-in-slide bg-background">
       {/* Welcome Greeting */}
       <section className="grid grid-cols-1 xl:grid-cols-3 gap-gutter">
         <div className="xl:col-span-2 glass-card rounded-xl p-6 flex flex-col justify-center relative overflow-hidden group">
-          {/* Holographic background graphic decoration */}
           <div className="absolute top-0 right-0 w-1/2 h-full opacity-10 pointer-events-none transition-transform duration-700 group-hover:scale-105">
             <svg viewBox="0 0 100 100" className="w-full h-full stroke-secondary-fixed-dim fill-none stroke-[0.2]">
               <circle cx="50" cy="50" r="40" />
@@ -29,7 +195,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
               Welcome, <span className="capitalize">{username || 'Engineer'}</span>.
             </h2>
             <p className="text-on-surface-variant max-w-xl text-sm leading-relaxed mb-6">
-              The PLM AI Assistant is synchronized. Database tables reflect 1,240 lifecycle events. Check BOM changes, workflow statuses, and tool actions below.
+              The PLM AI Assistant is synchronized. Database tables reflect {totalEvents.toLocaleString()} lifecycle events. Check BOM changes, workflow statuses, and tool actions below.
             </p>
             <div className="flex flex-wrap gap-sm">
               <button 
@@ -54,23 +220,28 @@ export function Dashboard({ onNavigate }: DashboardProps) {
             <span className="material-symbols-outlined text-secondary-fixed-dim text-lg">warning</span>
             Active Alerts
           </h3>
-          <div className="space-y-sm overflow-y-auto max-h-[160px] pr-xs">
-            {/* Critical Alert */}
-            <div className="p-3 bg-error-container/10 border-l-4 border-error rounded flex gap-2">
-              <span className="material-symbols-outlined text-error text-sm">error</span>
-              <div>
-                <p className="font-bold text-xs text-on-error-container">Critical Tolerance Offset</p>
-                <p className="text-on-surface-variant text-[11px] mt-0.5">Component T-800 revision mismatch detected.</p>
+          <div className="space-y-sm overflow-y-auto max-h-[160px] pr-xs flex-1">
+            {alerts.length > 0 ? (
+              alerts.slice(0, 3).map((alert, idx) => (
+                <div key={idx} className="p-3 bg-error-container/10 border-l-4 border-error rounded flex gap-2">
+                  <span className="material-symbols-outlined text-error text-sm">error</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="font-bold text-xs text-on-error-container truncate">{alert.message || 'Error encountered'}</p>
+                    <p className="text-on-surface-variant text-[11px] mt-0.5 truncate">
+                      {alert.service.toUpperCase()} {alert.method} {alert.endpoint} ({formatTimestamp(alert.timestamp)})
+                    </p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="p-3 bg-tertiary-container/10 border-l-4 border-tertiary rounded flex gap-2">
+                <span className="material-symbols-outlined text-tertiary text-sm">check_circle</span>
+                <div>
+                  <p className="font-bold text-xs text-on-tertiary-container">System Fully Operational</p>
+                  <p className="text-on-surface-variant text-[11px] mt-0.5">No critical issues or tolerance offsets detected.</p>
+                </div>
               </div>
-            </div>
-            {/* Normal Alert */}
-            <div className="p-3 bg-secondary-container/5 border-l-4 border-secondary-fixed-dim rounded flex gap-2">
-              <span className="material-symbols-outlined text-secondary-fixed-dim text-sm">info</span>
-              <div>
-                <p className="font-bold text-xs text-on-secondary-container">Workflow Sync</p>
-                <p className="text-on-surface-variant text-[11px] mt-0.5">Design release workflow 'Titan-04' is active.</p>
-              </div>
-            </div>
+            )}
           </div>
           <button 
             className="mt-auto w-full text-center text-xs font-bold text-secondary-fixed-dim hover:underline py-1"
@@ -89,7 +260,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
             <h3 className="text-base font-bold text-on-surface">Workflow Execution Trends</h3>
             <div className="flex gap-1 bg-surface-container-low p-1 rounded-lg">
               <button className="px-2.5 py-0.5 text-[10px] font-bold bg-secondary-container/20 text-secondary-fixed-dim rounded">7d</button>
-              <button className="px-2.5 py-0.5 text-[10px] font-medium text-on-surface-variant">30d</button>
+              <button className="px-2.5 py-0.5 text-[10px] font-medium text-on-surface-variant" onClick={() => onNavigate('logs')}>30d</button>
             </div>
           </div>
           
@@ -99,17 +270,24 @@ export function Dashboard({ onNavigate }: DashboardProps) {
               <div className="border-b border-white w-full"></div>
               <div className="border-b border-white w-full"></div>
             </div>
-            {/* Animated Chart Bars */}
-            <div className="flex-1 bg-primary/20 hover:bg-primary/40 transition-all rounded-t h-[45%]" title="Mon: 45"></div>
-            <div className="flex-1 bg-primary/20 hover:bg-primary/40 transition-all rounded-t h-[60%]" title="Tue: 60"></div>
-            <div className="flex-1 bg-secondary-fixed-dim/40 hover:bg-secondary-fixed-dim/60 transition-all rounded-t h-[80%] cyan-glow" title="Wed: 80"></div>
-            <div className="flex-1 bg-primary/20 hover:bg-primary/40 transition-all rounded-t h-[50%]" title="Thu: 50"></div>
-            <div className="flex-1 bg-primary/20 hover:bg-primary/40 transition-all rounded-t h-[75%]" title="Fri: 75"></div>
-            <div className="flex-1 bg-primary/20 hover:bg-primary/40 transition-all rounded-t h-[35%]" title="Sat: 35"></div>
-            <div className="flex-1 bg-primary/20 hover:bg-primary/40 transition-all rounded-t h-[40%]" title="Sun: 40"></div>
+            {/* Dynamic Chart Bars */}
+            {chartData.map((day, idx) => {
+              const heightPct = day.count === 0 ? '3%' : `${Math.round((day.count / maxCount) * 85 + 10)}%`;
+              const isMax = day.count === maxCount && day.count > 0;
+              return (
+                <div 
+                  key={idx} 
+                  className={`flex-1 transition-all rounded-t ${isMax ? 'bg-secondary-fixed-dim/40 hover:bg-secondary-fixed-dim/60 cyan-glow' : 'bg-primary/20 hover:bg-primary/40'}`}
+                  style={{ height: heightPct }}
+                  title={day.title}
+                />
+              );
+            })}
           </div>
           <div className="flex justify-between text-[10px] text-on-surface-variant mt-2 font-mono px-4">
-            <span>MON</span><span>TUE</span><span>WED</span><span>THU</span><span>FRI</span><span>SAT</span><span>SUN</span>
+            {chartData.map((day, idx) => (
+              <span key={idx}>{day.label}</span>
+            ))}
           </div>
         </div>
 
@@ -120,28 +298,28 @@ export function Dashboard({ onNavigate }: DashboardProps) {
             <div>
               <div className="flex justify-between text-xs mb-1">
                 <span className="text-on-surface font-medium">Design Engineering</span>
-                <span className="text-secondary-fixed-dim font-bold">88%</span>
+                <span className="text-secondary-fixed-dim font-bold">{designPct}%</span>
               </div>
               <div className="w-full bg-surface-container rounded-full h-1.5">
-                <div className="bg-secondary-fixed-dim h-full rounded-full" style={{ width: '88%' }}></div>
+                <div className="bg-secondary-fixed-dim h-full rounded-full transition-all duration-500" style={{ width: `${designPct}%` }}></div>
               </div>
             </div>
             <div>
               <div className="flex justify-between text-xs mb-1">
                 <span className="text-on-surface font-medium">Material Science</span>
-                <span className="text-primary font-bold">62%</span>
+                <span className="text-primary font-bold">{materialPct}%</span>
               </div>
               <div className="w-full bg-surface-container rounded-full h-1.5">
-                <div className="bg-primary h-full rounded-full" style={{ width: '62%' }}></div>
+                <div className="bg-primary h-full rounded-full transition-all duration-500" style={{ width: `${materialPct}%` }}></div>
               </div>
             </div>
             <div>
               <div className="flex justify-between text-xs mb-1">
                 <span className="text-on-surface font-medium">Manufacturing</span>
-                <span className="text-tertiary font-bold">45%</span>
+                <span className="text-tertiary font-bold">{manufacturingPct}%</span>
               </div>
               <div className="w-full bg-surface-container rounded-full h-1.5">
-                <div className="bg-tertiary h-full rounded-full" style={{ width: '45%' }}></div>
+                <div className="bg-tertiary h-full rounded-full transition-all duration-500" style={{ width: `${manufacturingPct}%` }}></div>
               </div>
             </div>
           </div>
@@ -164,30 +342,22 @@ export function Dashboard({ onNavigate }: DashboardProps) {
               </tr>
             </thead>
             <tbody className="divide-y divide-outline-variant/5">
-              <tr className="hover:bg-surface-variant/20 transition-colors">
-                <td className="p-4 font-medium text-on-surface">Query bearing item details</td>
-                <td className="p-4">Material Analysis</td>
-                <td className="p-4">
-                  <span className="px-2 py-0.5 bg-tertiary-container/30 text-tertiary rounded font-bold uppercase text-[9px]">Verified</span>
-                </td>
-                <td className="p-4 text-on-surface-variant">10:14 AM</td>
-              </tr>
-              <tr className="hover:bg-surface-variant/20 transition-colors">
-                <td className="p-4 font-medium text-on-surface">Update dataset specification</td>
-                <td className="p-4">CAD Design</td>
-                <td className="p-4">
-                  <span className="px-2 py-0.5 bg-tertiary-container/30 text-tertiary rounded font-bold uppercase text-[9px]">Verified</span>
-                </td>
-                <td className="p-4 text-on-surface-variant">09:42 AM</td>
-              </tr>
-              <tr className="hover:bg-surface-variant/20 transition-colors">
-                <td className="p-4 font-medium text-on-surface">Add item revision B</td>
-                <td className="p-4">Procurement</td>
-                <td className="p-4">
-                  <span className="px-2 py-0.5 bg-secondary-container/20 text-secondary-fixed-dim rounded font-bold uppercase text-[9px]">Pending</span>
-                </td>
-                <td className="p-4 text-on-surface-variant">Yesterday</td>
-              </tr>
+              {activity.length > 0 ? (
+                activity.map((log, idx) => (
+                  <tr key={idx} className="hover:bg-surface-variant/20 transition-colors">
+                    <td className="p-4 font-medium text-on-surface">{formatActivityDescription(log.action, log.endpoint)}</td>
+                    <td className="p-4">{getActivityDepartment(log.endpoint)}</td>
+                    <td className="p-4">
+                      <span className="px-2 py-0.5 bg-tertiary-container/30 text-tertiary rounded font-bold uppercase text-[9px]">Verified</span>
+                    </td>
+                    <td className="p-4 text-on-surface-variant">{formatTimestamp(log.timestamp)}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={4} className="p-4 text-center text-on-surface-variant italic">No system activity logged yet.</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

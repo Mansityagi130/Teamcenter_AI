@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import logging
 import time
+import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -23,6 +24,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
 import workflow
+import sys
+from middleware.request_logger import RequestLoggerMiddleware
+from services.database import get_database_path
+from services.observability import init_observability_tables, query_error_logs, get_log_metrics, get_log_trends
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from services import demo as demo_service
 
 app = FastAPI()
 BASE_DIR = Path(__file__).resolve().parent
@@ -44,10 +52,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestLoggerMiddleware)
 
 # Initialize Gemini
 GEMINI_API_KEY = os.getenv("Gemini_API_Key") or os.getenv("Gemini_API_KEY")
-GEMINI_MODEL = os.getenv("Gemini_Model_Name", "gemini-3-flash-preview")
+GEMINI_MODEL = os.getenv("Gemini_Model_Name", "gemini-2.5-flash")
 gemini_client = None
 
 def get_gemini_client(custom_key: Optional[str] = None):
@@ -102,15 +111,28 @@ def call_gemini_generate_content(*args, custom_key: Optional[str] = None, **kwar
 DATA_FILE = BASE_DIR / "data" / "items.csv"
 if not DATA_FILE.exists():
     DATA_FILE = BASE_DIR / "Data" / "items.csv"
-DB_FILE = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "teamcenter.db")))
+DB_FILE = get_database_path()
 FRONTEND_DIR = BASE_DIR / "frontend"
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "backend.log"
 
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "replace-with-secure-admin-token")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+if not ADMIN_TOKEN or ADMIN_TOKEN in ["replace-with-secure-admin-token", "admin", "secret", "change-me"]:
+    raise RuntimeError(
+        "Critical Configuration Error: ADMIN_TOKEN environment variable is not securely set.\n"
+        "Please configure a secure ADMIN_TOKEN in your .env file or environment variables."
+    )
+
 SHOW_ADMIN_TOKEN_ON_SITE = os.getenv("SHOW_ADMIN_TOKEN_ON_SITE", "false").lower() == "true"
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me-please")
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET or JWT_SECRET in ["change-me-please", "secret", "change-me"]:
+    raise RuntimeError(
+        "Critical Configuration Error: JWT_SECRET environment variable is not securely set.\n"
+        "Please configure a secure JWT_SECRET in your .env file or environment variables."
+    )
+
 JWT_EXP_SECONDS = int(os.getenv("JWT_EXP_SECONDS", "3600"))
 DEFAULT_CHAT_LIMIT = int(os.getenv("DEFAULT_CHAT_LIMIT", "500"))
 DAILY_CHAT_LIMIT = int(os.getenv("DAILY_CHAT_LIMIT", "500"))
@@ -122,12 +144,6 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 file_handler = RotatingFileHandler(str(LOG_FILE), maxBytes=5_000_000, backupCount=3)
 file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
 logger.addHandler(file_handler)
-
-if ADMIN_TOKEN == "replace-with-secure-admin-token":
-    logger.warning(
-        "ADMIN_TOKEN not set. Using default admin token. "
-        "Set ADMIN_TOKEN in .env or environment for production."
-    )
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
@@ -223,6 +239,14 @@ class ListFilterRequest(BaseModel):
     item_id: Optional[str] = None
 
 
+class BomRequest(BaseModel):
+    item_id: str
+
+
+class WorkflowApproveRequest(BaseModel):
+    workflow_id: str
+
+
 
 
 class ChatMessageRequest(BaseModel):
@@ -280,6 +304,503 @@ class ApiChatResponse(BaseModel):
     reply: str
     toolCalls: List[Dict[str, Any]]
     metadata: Dict[str, Any]
+
+
+class IntentResponse(BaseModel):
+    intent: str = Field(..., description="Must be one of: 'general_knowledge', 'teamcenter_retrieval', 'teamcenter_action', 'casual', 'general_coding', or 'unknown'")
+
+
+class AddItemSlots(BaseModel):
+    itemId: Optional[str] = Field(None, description="The unique ID of the item (e.g. 1000 or ITEM_1001)")
+    itemName: Optional[str] = Field(None, description="The display name of the item")
+    description: Optional[str] = Field(None, description="A description of the item")
+    revisionType: Optional[str] = Field(None, description="Must be 'custom' or 'auto' if specified, or null")
+    revisionId: Optional[str] = Field(None, description="Custom revision ID string (if specified or custom rev id is provided)")
+
+
+class CreateDatasetSlots(BaseModel):
+    datasetName: Optional[str] = Field(None, description="The name of the dataset")
+    datasetType: Optional[str] = Field(None, description="The type of the dataset (e.g. PDF, Text, etc.)")
+    targetItem: Optional[str] = Field(None, description="The ID of the target item this dataset belongs to")
+
+
+class CreateRevisionSlots(BaseModel):
+    item: Optional[str] = Field(None, description="The ID of the item to add a revision for")
+    revisionType: Optional[str] = Field(None, description="Must be 'custom' or 'auto' if specified, or null")
+    revisionId: Optional[str] = Field(None, description="The custom revision ID string (if custom is chosen)")
+
+
+class StartWorkflowSlots(BaseModel):
+    workflowName: Optional[str] = Field(None, description="The name of the workflow process")
+    targetItem: Optional[str] = Field(None, description="The ID of the target item the workflow targets")
+    approvers: Optional[str] = Field(None, description="The names of the approvers for the workflow (comma-separated if multiple)")
+
+
+# Session slots database helpers
+def get_session_slots(session_id: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT workflow_type, slots_json FROM session_slots WHERE session_id = ?", (session_id,)).fetchone()
+        if row:
+            return {
+                "workflow_type": row["workflow_type"],
+                "slots": json.loads(row["slots_json"])
+            }
+    return None
+
+
+def save_session_slots(session_id: str, workflow_type: str, slots: Dict[str, Any]):
+    with get_db_connection() as conn:
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT OR REPLACE INTO session_slots (session_id, workflow_type, slots_json, updated_at) VALUES (?, ?, ?, ?)",
+            (session_id, workflow_type, json.dumps(slots), now)
+        )
+        conn.commit()
+
+
+def clear_session_slots(session_id: str):
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM session_slots WHERE session_id = ?", (session_id,))
+        conn.commit()
+
+
+async def extract_slots_with_gemini(message_text: str, workflow_type: str, existing_slots: Dict[str, Any]) -> Dict[str, Any]:
+    client = get_gemini_client()
+    if not client:
+        return {}
+    
+    schema_map = {
+        "ADD_ITEM": AddItemSlots,
+        "CREATE_DATASET": CreateDatasetSlots,
+        "CREATE_REVISION": CreateRevisionSlots,
+        "START_WORKFLOW": StartWorkflowSlots
+    }
+    response_schema = schema_map.get(workflow_type)
+    if not response_schema:
+        return {}
+
+    prompt = (
+        f"You are an NLP parser. Update the parameters for the active workflow: '{workflow_type}'.\n"
+        f"User message: \"{message_text}\"\n"
+        f"Current parameter state: {json.dumps(existing_slots)}\n\n"
+        f"Extract all parameters from the user's message. Merge them with the current state. "
+        f"Do not overwrite already collected parameter values unless the user is explicitly correcting them (i.e. providing a new value for a parameter that was already set). "
+        f"Be flexible: users can enter parameters compactly or out of order (e.g. '1000 nia abcd custom rev id 4040' represents itemId='1000', itemName='nia', description='abcd', revisionType='custom', revisionId='4040')."
+    )
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema,
+                temperature=0.0
+            )
+        )
+        extracted = json.loads(response.text)
+        return {k: v for k, v in extracted.items() if v is not None}
+    except Exception as e:
+        logger.error(f"Error in extract_slots_with_gemini: {e}")
+        return {}
+
+
+def extract_slots_local(message_text: str, workflow_type: str, existing_slots: Dict[str, Any]) -> Dict[str, Any]:
+    extracted = {}
+    text = message_text.strip()
+    words = text.split()
+    
+    segments = [s.strip() for s in re.split(r'[\n,;]+', text) if s.strip()]
+    if len(segments) == 1 and len(words) >= 3:
+        segments = words
+
+    if workflow_type == "ADD_ITEM":
+        if len(segments) >= 3:
+            extracted["itemId"] = segments[0]
+            extracted["itemName"] = segments[1]
+            extracted["description"] = segments[2]
+            if len(segments) >= 4:
+                val = segments[3].lower()
+                if "custom" in val or "1" in val:
+                    extracted["revisionType"] = "custom"
+                elif "auto" in val or "2" in val:
+                    extracted["revisionType"] = "auto"
+            if len(segments) >= 5:
+                extracted["revisionId"] = segments[-1]
+        
+        if not extracted.get("itemId"):
+            for w in words:
+                if w.isdigit() or w.startswith("ITEM_") or w.startswith("item_"):
+                    extracted["itemId"] = w
+                    break
+        if not extracted.get("revisionType"):
+            if "custom" in text.lower() or "option 1" in text.lower():
+                extracted["revisionType"] = "custom"
+            elif "auto" in text.lower() or "option 2" in text.lower():
+                extracted["revisionType"] = "auto"
+        if not extracted.get("revisionId") and extracted.get("revisionType") == "custom":
+            rev_match = re.search(r'(?:rev|revision|id)\s+(\S+)', text, re.IGNORECASE)
+            if rev_match:
+                extracted["revisionId"] = rev_match.group(1)
+            elif len(words) > 0 and words[-1].isalnum() and len(words[-1]) <= 6:
+                extracted["revisionId"] = words[-1]
+
+    elif workflow_type == "CREATE_DATASET":
+        if len(segments) >= 3:
+            extracted["datasetName"] = segments[0]
+            extracted["datasetType"] = segments[1]
+            extracted["targetItem"] = segments[2]
+        else:
+            types_list = ["pdf", "text", "txt", "zip", "doc", "docx", "xls", "xlsx", "csv"]
+            for w in words:
+                if w.lower() in types_list:
+                    extracted["datasetType"] = w.upper()
+                elif w.isdigit() or w.startswith("ITEM_") or w.startswith("item_"):
+                    extracted["targetItem"] = w.upper()
+                else:
+                    if len(w) > 2 and not extracted.get("datasetName"):
+                        extracted["datasetName"] = w
+
+    elif workflow_type == "CREATE_REVISION":
+        if len(segments) >= 2:
+            extracted["item"] = segments[0]
+            val = segments[1].lower()
+            if "custom" in val or "1" in val:
+                extracted["revisionType"] = "custom"
+            elif "auto" in val or "2" in val:
+                extracted["revisionType"] = "auto"
+            if len(segments) >= 3:
+                extracted["revisionId"] = segments[2]
+        else:
+            for w in words:
+                if w.isdigit() or w.startswith("ITEM_") or w.startswith("item_"):
+                    extracted["item"] = w.upper()
+            if "custom" in text.lower() or "option 1" in text.lower():
+                extracted["revisionType"] = "custom"
+            elif "auto" in text.lower() or "option 2" in text.lower():
+                extracted["revisionType"] = "auto"
+
+    elif workflow_type == "START_WORKFLOW":
+        if len(segments) >= 3:
+            extracted["workflowName"] = segments[0]
+            extracted["targetItem"] = segments[1]
+            extracted["approvers"] = ", ".join(segments[2:])
+        else:
+            for w in words:
+                if w.isdigit() or w.startswith("ITEM_") or w.startswith("item_"):
+                    extracted["targetItem"] = w.upper()
+            
+            non_items = [w for w in words if not (w.isdigit() or w.startswith("ITEM_") or w.startswith("item_"))]
+            if len(non_items) > 0:
+                extracted["workflowName"] = non_items[0]
+            if len(non_items) > 1:
+                extracted["approvers"] = ", ".join(non_items[1:])
+
+    updated = {**existing_slots}
+    for k, v in extracted.items():
+        if v is not None:
+            updated[k] = v
+    return updated
+
+
+async def extract_and_merge_slots(message_text: str, workflow_type: str, existing_slots: Dict[str, Any]) -> Dict[str, Any]:
+    extracted = await extract_slots_with_gemini(message_text, workflow_type, existing_slots)
+    if extracted:
+        updated = {**existing_slots}
+        for k, v in extracted.items():
+            if v is not None:
+                updated[k] = str(v)
+        return updated
+    return extract_slots_local(message_text, workflow_type, existing_slots)
+
+
+async def process_interactive_workflows(conn, session_id: str, user_id: str, message_text: str) -> Tuple[Optional[str], bool]:
+    msg_clean = message_text.strip()
+    msg_lower = msg_clean.lower()
+
+    if msg_lower in ["cancel", "exit", "stop"]:
+        state = get_session_slots(session_id)
+        if state:
+            clear_session_slots(session_id)
+            return "Workflow cancelled. Let's start fresh. How can I help you today?", False
+        return None, False
+
+    init_workflow_type = None
+    if re.search(r"\b(create|add|new|insert)\s+(?:item|part)\b", msg_lower):
+        init_workflow_type = "ADD_ITEM"
+    elif re.search(r"\b(create|add|new|insert)\s+dataset\b", msg_lower):
+        init_workflow_type = "CREATE_DATASET"
+    elif re.search(r"\b(create|add|new|insert)\s+revision\b", msg_lower):
+        init_workflow_type = "CREATE_REVISION"
+    elif re.search(r"\b(start|create|new|run|trigger)\s+workflow\b", msg_lower):
+        init_workflow_type = "START_WORKFLOW"
+
+    if init_workflow_type:
+        clear_session_slots(session_id)
+        empty_slots = {}
+        if init_workflow_type == "ADD_ITEM":
+            empty_slots = {"itemId": None, "itemName": None, "description": None, "revisionType": None, "revisionId": None}
+        elif init_workflow_type == "CREATE_DATASET":
+            empty_slots = {"datasetName": None, "datasetType": None, "targetItem": None}
+        elif init_workflow_type == "CREATE_REVISION":
+            empty_slots = {"item": None, "revisionType": None, "revisionId": None}
+        elif init_workflow_type == "START_WORKFLOW":
+            empty_slots = {"workflowName": None, "targetItem": None, "approvers": None}
+        
+        save_session_slots(session_id, init_workflow_type, empty_slots)
+        
+        rest = msg_clean
+        rest = re.sub(r"^(create|add|new|insert|start|run|trigger)\s+(item|part|dataset|revision|workflow)\s*", "", rest, flags=re.IGNORECASE)
+        if rest.strip():
+            slots = await extract_and_merge_slots(rest, init_workflow_type, empty_slots)
+            save_session_slots(session_id, init_workflow_type, slots)
+        
+        state = {"workflow_type": init_workflow_type, "slots": get_session_slots(session_id)["slots"]}
+    else:
+        state = get_session_slots(session_id)
+
+    if not state:
+        return None, False
+
+    workflow_type = state["workflow_type"]
+    slots = state["slots"]
+
+    if not init_workflow_type:
+        slots = await extract_and_merge_slots(msg_clean, workflow_type, slots)
+        save_session_slots(session_id, workflow_type, slots)
+
+    missing_fields = []
+    checklist_lines = []
+
+    if workflow_type == "ADD_ITEM":
+        item_id = slots.get("itemId")
+        if item_id:
+            slots["itemId"] = item_id.strip().upper()
+            if not re.match(r"^[A-Za-z0-9_-]+$", slots["itemId"]):
+                slots["itemId"] = None
+                save_session_slots(session_id, workflow_type, slots)
+                return "I couldn't understand the Item ID. It contains invalid characters. Please enter a valid Item ID like 1001 or ITEM_1001.", True
+            
+            with get_db_connection() as c:
+                row = c.execute("SELECT 1 FROM items WHERE item_id = ?", (slots["itemId"],)).fetchone()
+                if row:
+                    slots["itemId"] = None
+                    save_session_slots(session_id, workflow_type, slots)
+                    return f"An item with ID '{item_id}' already exists in Teamcenter. Please enter a different Item ID.", True
+
+        checklist_lines.append(f"{'✓' if slots.get('itemId') else '☐'} Item ID: {slots.get('itemId') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('itemName') else '☐'} Item Name: {slots.get('itemName') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('description') else '☐'} Description: {slots.get('description') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('revisionType') else '☐'} Revision Type (Custom or Auto): {slots.get('revisionType') or '(Pending)'}")
+        
+        if slots.get("revisionType") == "custom":
+            checklist_lines.append(f"{'✓' if slots.get('revisionId') else '☐'} Custom Revision ID: {slots.get('revisionId') or '(Pending)'}")
+            if not slots.get("revisionId"):
+                missing_fields.append("Custom Revision ID")
+        elif not slots.get("revisionType"):
+            pass
+
+        if not slots.get("itemId"): missing_fields.append("Item ID")
+        if not slots.get("itemName"): missing_fields.append("Item Name")
+        if not slots.get("description"): missing_fields.append("Description")
+        if not slots.get("revisionType"): missing_fields.append("Revision Type (custom or auto)")
+
+    elif workflow_type == "CREATE_DATASET":
+        target_item = slots.get("targetItem")
+        if target_item:
+            slots["targetItem"] = target_item.strip().upper()
+            with get_db_connection() as c:
+                row = c.execute("SELECT 1 FROM items WHERE item_id = ?", (slots["targetItem"],)).fetchone()
+                if not row:
+                    slots["targetItem"] = None
+                    save_session_slots(session_id, workflow_type, slots)
+                    return f"Error: Target Item '{target_item}' not found. Please enter a valid existing Item ID.", True
+
+        checklist_lines.append(f"{'✓' if slots.get('datasetName') else '☐'} Dataset Name: {slots.get('datasetName') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('datasetType') else '☐'} Dataset Type: {slots.get('datasetType') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('targetItem') else '☐'} Target Item: {slots.get('targetItem') or '(Pending)'}")
+
+        if not slots.get("datasetName"): missing_fields.append("Dataset Name")
+        if not slots.get("datasetType"): missing_fields.append("Dataset Type")
+        if not slots.get("targetItem"): missing_fields.append("Target Item ID")
+
+    elif workflow_type == "CREATE_REVISION":
+        item_id = slots.get("item")
+        if item_id:
+            slots["item"] = item_id.strip().upper()
+            with get_db_connection() as c:
+                row = c.execute("SELECT 1 FROM items WHERE item_id = ?", (slots["item"],)).fetchone()
+                if not row:
+                    slots["item"] = None
+                    save_session_slots(session_id, workflow_type, slots)
+                    return f"Error: Item '{item_id}' not found. Please enter a valid existing Item ID.", True
+
+        checklist_lines.append(f"{'✓' if slots.get('item') else '☐'} Target Item: {slots.get('item') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('revisionType') else '☐'} Revision Type (Custom or Auto): {slots.get('revisionType') or '(Pending)'}")
+        
+        if slots.get("revisionType") == "custom":
+            checklist_lines.append(f"{'✓' if slots.get('revisionId') else '☐'} Custom Revision ID: {slots.get('revisionId') or '(Pending)'}")
+            if not slots.get("revisionId"):
+                missing_fields.append("Custom Revision ID")
+            elif slots.get("item"):
+                with get_db_connection() as c:
+                    row = c.execute("SELECT 1 FROM revisions WHERE item_id = ? AND revision_id = ?", (slots["item"], slots["revisionId"])).fetchone()
+                    if row:
+                        slots["revisionId"] = None
+                        save_session_slots(session_id, workflow_type, slots)
+                        return f"Error: Revision '{slots['revisionId']}' already exists for item '{slots['item']}'. Please enter a different Revision ID.", True
+        elif not slots.get("revisionType"):
+            pass
+
+        if not slots.get("item"): missing_fields.append("Target Item ID")
+        if not slots.get("revisionType"): missing_fields.append("Revision Type (custom or auto)")
+
+    elif workflow_type == "START_WORKFLOW":
+        target_item = slots.get("targetItem")
+        if target_item:
+            slots["targetItem"] = target_item.strip().upper()
+            with get_db_connection() as c:
+                row = c.execute("SELECT 1 FROM items WHERE item_id = ?", (slots["targetItem"],)).fetchone()
+                if not row:
+                    slots["targetItem"] = None
+                    save_session_slots(session_id, workflow_type, slots)
+                    return f"Error: Target Item '{target_item}' not found. Please enter a valid existing Item ID.", True
+
+        checklist_lines.append(f"{'✓' if slots.get('workflowName') else '☐'} Workflow Name: {slots.get('workflowName') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('targetItem') else '☐'} Target Item: {slots.get('targetItem') or '(Pending)'}")
+        checklist_lines.append(f"{'✓' if slots.get('approvers') else '☐'} Approvers: {slots.get('approvers') or '(Pending)'}")
+
+        if not slots.get("workflowName"): missing_fields.append("Workflow Name")
+        if not slots.get("targetItem"): missing_fields.append("Target Item ID")
+        if not slots.get("approvers"): missing_fields.append("Approvers")
+
+    if missing_fields:
+        checklist_str = "\n".join(checklist_lines)
+        missing_list = "\n".join([f"* {f}" for f in missing_fields])
+        response = (
+            f"Here is the status of your request:\n\n"
+            f"{checklist_str}\n\n"
+            f"I still need the following details to proceed:\n"
+            f"{missing_list}\n\n"
+            f"Please provide the remaining details or type **cancel** to stop."
+        )
+        return response, True
+
+    clear_session_slots(session_id)
+    
+    checklist_str = "\n".join(checklist_lines)
+    preamble = (
+        f"{checklist_str}\n\n"
+        f"All required information received.\n\n"
+        f"Proceeding with execution...\n\n"
+    )
+
+    if workflow_type == "ADD_ITEM":
+        item_id = slots["itemId"]
+        item_name = slots["itemName"]
+        desc = slots["description"]
+        rev_type = slots["revisionType"]
+        
+        if rev_type == "custom":
+            revision_id = slots["revisionId"]
+        else:
+            with get_db_connection() as c:
+                revision_id = workflow.get_next_revision_id(c, item_id)
+        
+        workflow.save_item_to_csv(item_id, item_name, desc, revision_id, created_by=user_id)
+        
+        return preamble + (
+            f"Success! Item created successfully:\n"
+            f"* **Item ID**: {item_id}\n"
+            f"* **Item Name**: {item_name}\n"
+            f"* **Item Description**: {desc}\n"
+            f"* **Revision ID**: {revision_id} ({rev_type.capitalize()})"
+        ), False
+
+    elif workflow_type == "CREATE_DATASET":
+        dataset_name = slots["datasetName"]
+        dataset_type = slots["datasetType"]
+        target_item = slots["targetItem"]
+        
+        dataset_id = f"DS_{dataset_name.replace(' ', '_').upper()}_{int(time.time())}"
+        now = datetime.utcnow().isoformat()
+        
+        with get_db_connection() as c:
+            c.execute(
+                "INSERT INTO datasets (dataset_id, dataset_name, item_id, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?)",
+                (dataset_id, dataset_name, target_item, now, now, user_id)
+            )
+            c.commit()
+            log_user_activity(c, user_id, "/dataset/add", f"chat_add_dataset:{dataset_id}")
+            
+        return preamble + (
+            f"Success! Dataset created successfully:\n"
+            f"* **Dataset ID**: {dataset_id}\n"
+            f"* **Dataset Name**: {dataset_name}\n"
+            f"* **Dataset Type**: {dataset_type}\n"
+            f"* **Linked Item**: {target_item}"
+        ), False
+
+    elif workflow_type == "CREATE_REVISION":
+        item_id = slots["item"]
+        rev_type = slots["revisionType"]
+        
+        with get_db_connection() as c:
+            if rev_type == "custom":
+                rev_id = slots["revisionId"]
+            else:
+                rev_id = workflow.get_next_revision_id(c, item_id)
+                
+            now = datetime.utcnow().isoformat()
+            c.execute(
+                "INSERT INTO revisions (revision_id, item_id, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?)",
+                (rev_id, item_id, now, now, user_id)
+            )
+            c.commit()
+            log_user_activity(c, user_id, "/revision/add", f"chat_add_revision:{item_id}:{rev_id}")
+
+        return preamble + (
+            f"Success! Revision created successfully:\n"
+            f"* **Item ID**: {item_id}\n"
+            f"* **Revision ID**: {rev_id} ({rev_type.capitalize()})"
+        ), False
+
+    elif workflow_type == "START_WORKFLOW":
+        wf_name = slots["workflowName"]
+        target_item = slots["targetItem"]
+        approvers = slots["approvers"]
+        
+        wf_id = f"WF_{wf_name.replace(' ', '_').upper()}_{int(time.time())}"
+        now = datetime.utcnow().isoformat()
+        
+        with get_db_connection() as c:
+            rev_row = c.execute("SELECT id, revision_id FROM revisions WHERE item_id = ? ORDER BY id DESC LIMIT 1", (target_item,)).fetchone()
+            if not rev_row:
+                c.execute(
+                    "INSERT INTO revisions (revision_id, item_id, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?)",
+                    ("A", target_item, now, now, user_id)
+                )
+                c.commit()
+                rev_row = c.execute("SELECT id, revision_id FROM revisions WHERE item_id = ? ORDER BY id DESC LIMIT 1", (target_item,)).fetchone()
+                
+            c.execute(
+                "INSERT INTO workflows (workflow_id, workflow_name, workflow_status, revision_row_id, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (wf_id, wf_name, "Started", rev_row["id"], now, now, user_id)
+            )
+            c.commit()
+            log_user_activity(c, user_id, "/workflow/add", f"chat_add_workflow:{wf_id}")
+            
+        return preamble + (
+            f"Success! Workflow started successfully:\n"
+            f"* **Workflow ID**: {wf_id}\n"
+            f"* **Workflow Name**: {wf_name}\n"
+            f"* **Target Item**: {target_item}\n"
+            f"* **Revision**: {rev_row['revision_id']}\n"
+            f"* **Approvers**: {approvers}\n"
+            f"* **Status**: Started"
+        ), False
+
+    return None, False
 
 
 def b64url_encode(value: bytes) -> str:
@@ -359,6 +880,8 @@ def get_db_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
+AUDIT_LOG_RETENTION_DAYS = 365
+
 
 def init_db() -> None:
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -405,6 +928,9 @@ def init_db() -> None:
         if "session_id" not in columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'")
             conn.commit()
+        if "tool_calls" not in columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN tool_calls TEXT")
+            conn.commit()
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS chat_usage (
@@ -439,6 +965,17 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_slots (
+                session_id TEXT PRIMARY KEY,
+                workflow_type TEXT NOT NULL,
+                slots_json TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        init_observability_tables(conn)
         
         # Ensure users table supports createdAt, updatedAt, createdBy
         cursor.execute("PRAGMA table_info(users)")
@@ -451,23 +988,163 @@ def init_db() -> None:
             conn.execute("UPDATE users SET updatedAt = created_at WHERE updatedAt IS NULL")
         if "createdBy" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN createdBy TEXT")
+        if "role" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'Standard User'")
+            conn.commit()
+        if "id" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN id INTEGER")
+            conn.execute("UPDATE users SET id = rowid")
+            conn.commit()
+
+        # Create trigger to keep 'id' in sync on insert
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS sync_user_id AFTER INSERT ON users
+            BEGIN
+                UPDATE users SET id = rowid WHERE rowid = NEW.rowid;
+            END
+            """
+        )
+        conn.commit()
+
+        # Create roles table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role_name TEXT UNIQUE NOT NULL
+            )
+            """
+        )
+        for r_name in ["Administrator", "Chief Engineer", "Standard User"]:
+            conn.execute("INSERT OR IGNORE INTO roles (role_name) VALUES (?)", (r_name,))
+        conn.commit()
+
+        # Create permissions tables
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                permission_key TEXT UNIQUE NOT NULL,
+                description TEXT
+            )
+            """
+        )
+        conn.execute("DROP TABLE IF EXISTS user_permissions")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_permissions (
+                user_id INTEGER NOT NULL,
+                permission_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, permission_id),
+                FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        # Master permissions seed data
+        permissions_seed = [
+            ("VIEW_HEALTH_DASHBOARD", "Allow viewing system health dashboard"),
+            ("VIEW_SECURITY_LOGS", "Allow viewing security auditing logs"),
+            ("VIEW_MCP_EXPLORER", "Allow viewing MCP tools explorer"),
+            ("VIEW_RAW_CONSOLE", "Allow viewing raw console logs"),
+            ("MANAGE_USERS", "Allow managing system users, roles, and permissions"),
+            ("VIEW_AUDIT_LOGS", "Allow viewing administrative audit logs")
+        ]
+        for key, desc in permissions_seed:
+            conn.execute(
+                "INSERT OR IGNORE INTO permissions (permission_key, description) VALUES (?, ?)",
+                (key, desc)
+            )
+        conn.commit()
+
+        # Create audit_logs table and indexes
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                admin_user_id INTEGER NOT NULL,
+                admin_username TEXT NOT NULL,
+                target_user_id INTEGER NOT NULL,
+                target_username TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                ip_address TEXT,
+                user_agent TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_admin_user ON audit_logs(admin_user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_target_user ON audit_logs(target_user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_action_type ON audit_logs(action_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp_action ON audit_logs(timestamp, action_type)")
+        conn.commit()
+
+        # Create system_metadata table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+        conn.commit()
 
         # Ensure 'system' user exists to satisfy foreign key constraints
         cursor = conn.execute("SELECT 1 FROM users WHERE username = ?", ("system",))
         if cursor.fetchone() is None:
             now = datetime.utcnow().isoformat()
             password_data = hash_password(secrets.token_urlsafe(32))
-            # Since create_unique_api_key might be defined later or needs transaction commit first:
             api_key = secrets.token_urlsafe(32)
             conn.execute(
-                "INSERT INTO users (username, password_hash, password_salt, api_key, created_at, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("system", password_data["hash"], password_data["salt"], api_key, now, now, now, None)
+                "INSERT INTO users (username, password_hash, password_salt, api_key, created_at, createdAt, updatedAt, createdBy, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("system", password_data["hash"], password_data["salt"], api_key, now, now, now, None, "Administrator")
             )
-            # Ensure chat_usage is also created
             conn.execute(
                 "INSERT INTO chat_usage (user_id, message_count, chat_limit, updated_at) VALUES (?, ?, ?, ?)",
                 ("system", 0, DEFAULT_CHAT_LIMIT, now)
             )
+
+        # Seed roles and permissions for existing users
+        cursor = conn.cursor()
+        cursor.execute("SELECT rowid, username, role FROM users")
+        for row in cursor.fetchall():
+            rowid_val = row["rowid"]
+            username = row["username"]
+            current_role = row["role"]
+            user_lower = username.lower()
+            
+            new_role = current_role
+            if current_role == "Standard User":
+                if user_lower in {"mansi", "system", "smoketest", "tc_admin_prod"} or "admin" in user_lower:
+                    new_role = "Administrator"
+                elif "chief" in user_lower or "engineer" in user_lower:
+                    new_role = "Chief Engineer"
+                    
+            if new_role != current_role:
+                conn.execute("UPDATE users SET role = ? WHERE rowid = ?", (new_role, rowid_val))
+                
+            role_permissions = []
+            if new_role == "Administrator":
+                role_permissions = ["VIEW_HEALTH_DASHBOARD", "VIEW_SECURITY_LOGS", "VIEW_MCP_EXPLORER", "VIEW_RAW_CONSOLE", "MANAGE_USERS", "VIEW_AUDIT_LOGS"]
+            elif new_role == "Chief Engineer":
+                role_permissions = ["VIEW_HEALTH_DASHBOARD", "VIEW_SECURITY_LOGS", "VIEW_RAW_CONSOLE"]
+            else:
+                role_permissions = ["VIEW_RAW_CONSOLE"]
+                
+            for p_key in role_permissions:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO user_permissions (user_id, permission_id)
+                    SELECT ?, id FROM permissions WHERE permission_key = ?
+                    """,
+                    (rowid_val, p_key)
+                )
+        conn.commit()
 
         # Create items table
         conn.execute(
@@ -550,6 +1227,66 @@ def init_db() -> None:
             """
         )
         
+        # Create bom_relations table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bom_relations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_item_id TEXT NOT NULL,
+                child_item_id TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                createdBy TEXT,
+                FOREIGN KEY(parent_item_id) REFERENCES items(item_id) ON DELETE CASCADE,
+                FOREIGN KEY(child_item_id) REFERENCES items(item_id) ON DELETE CASCADE,
+                FOREIGN KEY(createdBy) REFERENCES users(username) ON DELETE SET NULL,
+                UNIQUE(parent_item_id, child_item_id)
+            )
+            """
+        )
+        
+        # Create forms table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS forms (
+                form_id TEXT PRIMARY KEY,
+                form_name TEXT NOT NULL,
+                form_type TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                createdBy TEXT,
+                FOREIGN KEY(createdBy) REFERENCES users(username) ON DELETE SET NULL
+            )
+            """
+        )
+
+        # Create folders table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS folders (
+                folder_id TEXT PRIMARY KEY,
+                folder_name TEXT NOT NULL,
+                folder_description TEXT,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                createdBy TEXT,
+                FOREIGN KEY(createdBy) REFERENCES users(username) ON DELETE SET NULL
+            )
+            """
+        )
+        
+        # Create Performance Indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_user_session ON chat_messages(user_id, session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_usage_history_user_time ON chat_usage_history(user_id, timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_logs_user_time ON activity_logs(user_id, timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_logs_endpoint ON activity_logs(endpoint)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_item_name ON items(item_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_revisions_item_id ON revisions(item_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_item_id ON datasets(item_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_workflows_revision_row_id ON workflows(revision_row_id)")
+
         # Ensure a settings record exists for the 'system' user
         cursor = conn.execute("SELECT 1 FROM user_settings WHERE user_id = ?", ("system",))
         if cursor.fetchone() is None:
@@ -558,6 +1295,69 @@ def init_db() -> None:
                 ("system", "", "", "", "tc_admin_prod", "", "gemini", "dev")
             )
             
+        # Seed mock BOM data if empty
+        cursor = conn.execute("SELECT COUNT(*) FROM bom_relations")
+        if cursor.fetchone()[0] == 0:
+            now = datetime.utcnow().isoformat()
+            mock_items = [
+                ("VALVE_100", "Control Valve", "Main flow control valve"),
+                ("VALVE_BODY", "Valve Body", "Cast iron main body"),
+                ("STEM", "Valve Stem", "Stainless steel stem"),
+                ("ACTUATOR", "Actuator", "Electrical actuator valve controller"),
+                ("MOTOR", "Actuator Motor", "24V DC stepper motor"),
+                ("GEARBOX", "Actuator Gearbox", "10:1 planetary gearbox")
+            ]
+            for item_id, item_name, item_desc in mock_items:
+                cursor_item = conn.execute("SELECT 1 FROM items WHERE item_id = ?", (item_id,))
+                if cursor_item.fetchone() is None:
+                    conn.execute(
+                        "INSERT INTO items (item_id, item_name, item_description, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?)",
+                        (item_id, item_name, item_desc, now, now, "system")
+                    )
+                cursor_rev = conn.execute("SELECT 1 FROM revisions WHERE item_id = ? AND revision_id = 'A'", (item_id,))
+                if cursor_rev.fetchone() is None:
+                    conn.execute(
+                        "INSERT INTO revisions (revision_id, item_id, createdAt, updatedAt, createdBy) VALUES ('A', ?, ?, ?, 'system')",
+                        (item_id, now, now)
+                    )
+            
+            relationships = [
+                ("VALVE_100", "VALVE_BODY", 1),
+                ("VALVE_100", "STEM", 1),
+                ("VALVE_100", "ACTUATOR", 1),
+                ("ACTUATOR", "MOTOR", 1),
+                ("ACTUATOR", "GEARBOX", 1)
+            ]
+            for parent, child, qty in relationships:
+                conn.execute(
+                    "INSERT OR IGNORE INTO bom_relations (parent_item_id, child_item_id, quantity, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?)",
+                    (parent, child, qty, now, now, "system")
+                )
+            
+        # Seed mock forms and folders
+        now = datetime.utcnow().isoformat()
+        cursor = conn.execute("SELECT COUNT(*) FROM forms")
+        if cursor.fetchone()[0] == 0:
+            conn.execute(
+                "INSERT INTO forms (form_id, form_name, form_type, createdAt, updatedAt, createdBy) VALUES ('FORM_001', 'Item Master Attribute Form', 'MasterForm', ?, ?, 'system')",
+                (now, now)
+            )
+            conn.execute(
+                "INSERT INTO forms (form_id, form_name, form_type, createdAt, updatedAt, createdBy) VALUES ('FORM_002', 'Workflow Release Form', 'ReleaseForm', ?, ?, 'system')",
+                (now, now)
+            )
+            
+        cursor = conn.execute("SELECT COUNT(*) FROM folders")
+        if cursor.fetchone()[0] == 0:
+            conn.execute(
+                "INSERT INTO folders (folder_id, folder_name, folder_description, createdAt, updatedAt, createdBy) VALUES ('FOLDER_001', 'Root Mailbox Folder', 'User incoming work items', ?, ?, 'system')",
+                (now, now)
+            )
+            conn.execute(
+                "INSERT INTO folders (folder_id, folder_name, folder_description, createdAt, updatedAt, createdBy) VALUES ('FOLDER_002', 'CAD Release Archive', 'Released component CAD designs', ?, ?, 'system')",
+                (now, now)
+            )
+
         conn.commit()
 
         # Perform CSV Data Migration
@@ -606,6 +1406,41 @@ def init_db() -> None:
 
 def init_data_file() -> None:
     workflow.init_data_file()
+
+
+def prune_audit_logs(conn, now: datetime) -> None:
+    now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff_time = (now - timedelta(days=AUDIT_LOG_RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    cursor = conn.execute("DELETE FROM audit_logs WHERE timestamp < ?", (cutoff_time,))
+    deleted_count = cursor.rowcount
+    logger.info(f"Pruned audit logs: deleted {deleted_count} records older than {cutoff_time}.")
+    
+    conn.execute(
+        "INSERT OR REPLACE INTO system_metadata (key, value) VALUES ('last_audit_prune_timestamp', ?)",
+        (now_str,)
+    )
+    conn.commit()
+
+
+def check_and_prune_audit_logs() -> None:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT value FROM system_metadata WHERE key = 'last_audit_prune_timestamp'").fetchone()
+        
+        should_prune = False
+        now = datetime.utcnow()
+        if not row:
+            should_prune = True
+        else:
+            try:
+                last_prune = datetime.strptime(row["value"], "%Y-%m-%dT%H:%M:%SZ")
+                if (now - last_prune) >= timedelta(days=1):
+                    should_prune = True
+            except Exception:
+                should_prune = True
+                
+        if should_prune:
+            prune_audit_logs(conn, now)
 
 
 
@@ -725,6 +1560,10 @@ def ensure_user_record(conn: sqlite3.Connection, user_id: str) -> None:
 def on_startup() -> None:
     init_db()
     init_data_file()
+    try:
+        check_and_prune_audit_logs()
+    except Exception as e:
+        logger.error(f"Failed to check and prune audit logs on startup: {e}")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -884,6 +1723,15 @@ CODING_SYSTEM_INSTRUCTION = (
     "3. Help debug errors and explain the root cause of programming bugs.\n"
     "4. Keep explanations concise and focused.\n"
     "5. You have access to get_user_details_tool and show_system_capabilities_tool if requested."
+)
+
+GENERAL_SYSTEM_INSTRUCTION = (
+    "You are a helpful, intelligent, and general-purpose AI assistant and copilot.\n"
+    "Rules:\n"
+    "1. Answer the user's questions clearly, accurately, and comprehensively.\n"
+    "2. You can help with general knowledge queries, science, math, history, recipes, and other general topics.\n"
+    "3. Keep your tone helpful, informative, and friendly.\n"
+    "4. Provide responses directly without mentioning limitations unless they are safety-related."
 )
 
 UNKNOWN_SYSTEM_INSTRUCTION = (
@@ -1131,47 +1979,16 @@ def get_canonical_intent(message_text: str) -> Tuple[Optional[str], dict]:
 
     return None, {}
 
-def detect_intent(message_text: str, history: List[Any]) -> str:
+
+async def detect_intent(message_text: str, history: List[Any]) -> str:
     msg_clean = re.sub(r'[^\w\s]', '', message_text.lower()).strip()
     words = set(msg_clean.split())
     
-    # Fallback protection: prefer Teamcenter/database routing if key entities are present
-    entities = {
-        "item", "items", "part", "parts",
-        "dataset", "datasets", "file", "files",
-        "workflow", "workflows", "wf", "process",
-        "revision", "revisions", "rev", "revs",
-        "user", "users", "member", "members"
-    }
-    if any(ent in words for ent in entities):
-        return "teamcenter_technical"
-        
     # 1. Exact preset keys check
     if msg_clean in CASUAL_PRESETS:
         return "casual"
         
-    # 2. Check keywords in the current message
-    words = set(msg_clean.split())
-    
-    has_tc = any((kw in msg_clean if len(kw) > 4 else kw in words) for kw in TEAMCENTER_KEYWORDS)
-    for short_tc in ["itk", "rac", "lov", "bom", "soa", "grm", "awc", "fcc", "pom", "plm"]:
-        if short_tc in words:
-            has_tc = True
-            
-    has_code = any((kw in msg_clean if len(kw) > 3 else kw in words) for kw in CODING_KEYWORDS)
-    for short_code in ["sql", "git", "api", "css", "js", "cpp"]:
-        if short_code in words:
-            has_code = True
-
-    if any(cmd in msg_clean for cmd in ["add item", "item list", "list items", "search item", "find item"]):
-        has_tc = True
-
-    if has_tc and not has_code:
-        return "teamcenter_technical"
-    if has_code and not has_tc:
-        return "general_coding"
-        
-    # Check for casual keywords
+    # Heuristics for casual keywords
     CASUAL_KEYWORDS = {
         "hello", "hi", "hey", "good morning", "good afternoon", "good evening", 
         "how are you", "who are you", "what can you do", "thank you", "thanks", 
@@ -1180,45 +1997,76 @@ def detect_intent(message_text: str, history: List[Any]) -> str:
         "whats up", "cool", "ok", "okay", "great", "awesome", "yes", "no", "nice",
         "sure", "wow", "perfect", "fine", "good night", "goodnight", "good", "bye"
     }
-    has_casual = any((kw in msg_clean if len(kw) > 3 else kw in words) for kw in CASUAL_KEYWORDS)
-    if has_casual:
+    if any(w in words for w in CASUAL_KEYWORDS):
         return "casual"
-        
-    # 3. Context inheritance: Check previous messages in the current session
-    if history:
-        for row in reversed(history):
-            prev_msg = row["message"].lower()
-            prev_clean = re.sub(r'[^\w\s]', '', prev_msg).strip()
-            prev_words = set(prev_clean.split())
+ 
+    # 2. Check for action workflow starts (Route C)
+    if re.search(r"\b(create|add|new|insert)\s+(?:item|part)\b", msg_clean):
+        return "teamcenter_action"
+    if re.search(r"\b(create|add|new|insert)\s+dataset\b", msg_clean):
+        return "teamcenter_action"
+    if re.search(r"\b(create|add|new|insert)\s+revision\b", msg_clean):
+        return "teamcenter_action"
+    if re.search(r"\b(start|create|new|run|trigger)\s+workflow\b", msg_clean):
+        return "teamcenter_action"
+ 
+    # 3. Check for local retrieval commands (Route B)
+    syn_actions = {
+        "LIST": ["list", "show", "display", "get", "view", "print"],
+        "SEARCH": ["find", "search", "locate", "query"],
+        "DELETE": ["remove", "delete", "destroy", "discard"],
+        "ADD": ["add", "create", "new", "insert"]
+    }
+    PLM_KEYWORDS = {
+        "plm", "teamcenter", "bom", "bill of materials", "dataset", "revision", "workflow", "workspace",
+        "lov", "bmide", "active workspace", "access manager", "grm", "iman", "itk", "soa", "rac",
+        "item", "part", "release status"
+    }
+    is_plm_related = any(w in words for w in PLM_KEYWORDS) or any(kw in msg_clean for kw in ["bill of materials", "active workspace", "access manager", "release status"])
+    
+    if any(w in words for w in syn_actions["LIST"]) or any(w in words for w in syn_actions["SEARCH"]):
+        if is_plm_related or any(w.isdigit() for w in words):
+            return "teamcenter_retrieval"
             
-            prev_has_tc = any((kw in prev_clean if len(kw) > 4 else kw in prev_words) for kw in TEAMCENTER_KEYWORDS) or any(cmd in prev_clean for cmd in ["add item", "item list", "list items", "search item", "find item"])
-            for short_tc in ["itk", "rac", "lov", "bom", "soa", "grm", "awc", "fcc", "pom", "plm"]:
-                if short_tc in prev_words:
-                    prev_has_tc = True
+    # Check for general knowledge / PLM knowledge
+    if any(k in msg_clean for k in ["what is", "explain", "means", "difference", "define", "how to", "recipe", "formula", "calculate", "solve", "tell me"]):
+        if is_plm_related:
+            return "general_knowledge"
+        else:
+            return "unknown"  # General knowledge (Route A - bypass MCP)
             
-            prev_has_code = any((kw in prev_clean if len(kw) > 3 else kw in prev_words) for kw in CODING_KEYWORDS)
-            for short_code in ["sql", "git", "api", "css", "js", "cpp"]:
-                if short_code in prev_words:
-                    prev_has_code = True
-                    
-            if prev_has_tc and not prev_has_code:
-                return "teamcenter_technical"
-            if prev_has_code and not prev_has_tc:
-                return "general_coding"
-                
-    # 4. Fallback: Ask Gemini to classify
-    if get_gemini_client():
+    # Coding keywords check
+    CODING_KEYWORDS = {
+        "python", "javascript", "java", "html", "css", "sql", "code", "programming", "function", "class",
+        "debug", "error", "compile", "script", "json", "xml", "api", "c++", "c#"
+    }
+    if any(w in words for w in CODING_KEYWORDS):
+        return "general_coding"
+
+    # Exact PLM keyword check
+    if msg_clean in PLM_KEYWORDS:
+        return "general_knowledge"
+
+    # Math calculation heuristic (digits, math symbols, spaces, optional ?)
+    if re.search(r"^[0-9\s\+\-\*\/\(\)\=\.\?]+$", message_text.strip()):
+        return "unknown"
+
+    # 4. Call Gemini to classify intent (if heuristics did not match)
+    client = get_gemini_client()
+    if client:
         try:
             classification_prompt = (
-                f"Classify the intent of the following user message into exactly one of these categories: 'casual', 'teamcenter_technical', 'general_coding', or 'unknown'.\n"
-                f"Do not return any other text. Follow the descriptions:\n"
-                f"- 'casual': greetings, small talk, jokes, thanking, general questions about bot identity/capabilities.\n"
-                f"- 'teamcenter_technical': Siemens Teamcenter, PLM, BMIDE, workflows, database items, active workspace, RAC, itk, soa, etc.\n"
-                f"- 'general_coding': programming, general coding questions, writing code, databases, debugging, etc.\n"
-                f"- 'unknown': any unrelated topics (e.g. recipes, sports, history, weather, movies, shopping, etc.)\n\n"
+                f"Classify the intent of the following user message into exactly one of these categories:\n"
+                f"- 'general_knowledge': General knowledge questions about PLM, Teamcenter, CAD, BOM, revisions, differences, definitions, etc. Examples: 'What is PLM?', 'Explain BOM', 'Difference between CAD and PLM', 'What is a revision?', 'plm means'\n"
+                f"- 'teamcenter_retrieval': Retrieving, showing, searching, or listing specific active database data/entities. Examples: 'Show item 1000', 'Fetch BOM for Item 4920', 'Show revision history', 'List datasets'\n"
+                f"- 'teamcenter_action': Creating, adding, deleting, starting workflows, or modifying database entities. Examples: 'Create Item', 'Add Dataset', 'Create Revision', 'Start Workflow', 'delete item 1000'\n"
+                f"- 'casual': Greetings, small talk, jokes, gratitude, or bot capabilities.\n"
+                f"- 'general_coding': Programming questions, writing code, databases (general SQL), HTML, CSS, JS, etc.\n"
+                f"- 'unknown': Any unrelated topics.\n\n"
                 f"User Message: \"{message_text}\""
             )
-            response = call_gemini_generate_content(
+            response = await asyncio.to_thread(
+                client.models.generate_content,
                 model=GEMINI_MODEL,
                 contents=classification_prompt,
                 config=types.GenerateContentConfig(
@@ -1229,15 +2077,19 @@ def detect_intent(message_text: str, history: List[Any]) -> str:
             )
             data = json.loads(response.text)
             detected = data.get("intent", "unknown")
-            if detected in {"casual", "teamcenter_technical", "general_coding", "unknown"}:
+            if detected in {"general_knowledge", "teamcenter_retrieval", "teamcenter_action", "casual", "general_coding", "unknown"}:
                 return detected
         except Exception as e:
             logger.error(f"Error detecting intent using Gemini: {e}")
             
+    # Heuristic fallback if Gemini fails/offline
+    if any(w in words for w in syn_actions["ADD"]) or any(w in words for w in syn_actions["DELETE"]):
+        return "teamcenter_action"
+
     return "unknown"
 
 
-def generate_and_save_response(
+async def generate_and_save_response(
     conn,
     user_id: str,
     session_id: str,
@@ -1853,7 +2705,7 @@ def generate_and_save_response(
         """Retrieves the current user's profile and system details (excluding private fields)."""
         try:
             with get_db_connection() as c:
-                user_row = c.execute("SELECT username, api_key, created_at FROM users WHERE username = ?", (user_id,)).fetchone()
+                user_row = c.execute("SELECT username, api_key, created_at, role FROM users WHERE username = ?", (user_id,)).fetchone()
                 usage_row = c.execute("SELECT message_count, chat_limit FROM chat_usage WHERE user_id = ?", (user_id,)).fetchone()
             if not user_row:
                 return "Error: User details not found."
@@ -1861,6 +2713,7 @@ def generate_and_save_response(
             created_at = user_row["created_at"]
             message_count = usage_row["message_count"] if usage_row else 0
             chat_limit = usage_row["chat_limit"] if usage_row else 500
+            role_val = user_row["role"] or "Standard User"
             return (
                 f"User Profile Details:\n"
                 f"- Username: {user_row['username']}\n"
@@ -1868,7 +2721,7 @@ def generate_and_save_response(
                 f"- Assigned API Key: {api_key}\n"
                 f"- Chat Messages Sent Today: {message_count}\n"
                 f"- Daily Chat Limit: {chat_limit}\n"
-                f"- Role: Standard User"
+                f"- Role: {role_val}"
             )
         except Exception as e:
             return f"Error: {str(e)}"
@@ -1885,13 +2738,12 @@ def generate_and_save_response(
             "Feel free to ask me to perform any of these tasks or ask questions about Siemens Teamcenter PLM!"
         )
 
-    # Intercept with interactive workflow engine (strictly local, gemini_client=None)
-    wf_response, wf_active = workflow.handle_workflow_message(
+    # Intercept with interactive workflow engine
+    wf_response, wf_active = await process_interactive_workflows(
+        conn=conn,
         session_id=session_id,
         user_id=user_id,
-        message=message_text,
-        gemini_client=None,
-        gemini_model=GEMINI_MODEL
+        message_text=message_text
     )
     if wf_response:
         cursor = conn.execute(
@@ -1913,7 +2765,7 @@ def generate_and_save_response(
     msg_lower = message_text.lower()
 
     # Detect intent
-    intent = detect_intent(message_text, history_rows)
+    intent = await detect_intent(message_text, history_rows)
     logger.info(f"User {user_id} in session {session_id} message intent: {intent}")
 
     # PRIORITY 1: Local greetings & casual presets (100% local, never reach Gemini API)
@@ -2054,46 +2906,33 @@ def generate_and_save_response(
                 )
             )
 
-            def wrap_tool(func):
-                import functools
-                @functools.wraps(func)
-                def wrapper(*args, **kwargs):
-                    import inspect
-                    sig = inspect.signature(func)
-                    bound = sig.bind_partial(*args, **kwargs)
-                    bound.apply_defaults()
-                    arguments = dict(bound.arguments)
-                    result = func(*args, **kwargs)
-                    if executed_tools is not None:
-                        executed_tools.append({
-                            "name": func.__name__,
-                            "parameters": {k: str(v) for k, v in arguments.items()},
-                            "result": str(result)
-                        })
-                    return result
-                return wrapper
+            # Retrieve user API key and build server credentials
+            user_row = conn.execute("SELECT api_key FROM users WHERE username = ?", (user_id,)).fetchone()
+            user_api_key = user_row["api_key"] if user_row else ""
+            user_jwt = generate_jwt({"sub": user_id})
 
-            # Determine system prompt and tools based on intent
-            raw_tools = []
-            if intent == "teamcenter_technical":
+            server_params = StdioServerParameters(
+                command=sys.executable,
+                args=["mcp_server.py"],
+                env={
+                    **os.environ,
+                    "BACKEND_URL": f"http://127.0.0.1:8000",
+                    "BACKEND_API_KEY": user_api_key,
+                    "BACKEND_JWT": user_jwt
+                },
+                cwd=str(BASE_DIR)
+            )
+
+            if intent == "general_knowledge" or intent == "teamcenter_retrieval" or intent == "teamcenter_technical":
                 system_instruction = TEAMCENTER_SYSTEM_INSTRUCTION
-                raw_tools = [
-                    add_item_tool, update_item_tool, delete_item_tool, list_items_tool, search_item_tool,
-                    add_dataset_tool, update_dataset_tool, delete_dataset_tool, list_datasets_tool,
-                    add_revision_tool, delete_revision_tool, list_revisions_tool,
-                    add_workflow_tool, update_workflow_tool, delete_workflow_tool, list_workflows_tool,
-                    search_user_tool, delete_user_tool, list_users_tool,
-                    get_user_details_tool, show_system_capabilities_tool
-                ]
             elif intent == "general_coding":
                 system_instruction = CODING_SYSTEM_INSTRUCTION
-                raw_tools = [get_user_details_tool, show_system_capabilities_tool]
             elif intent == "casual":
                 system_instruction = CASUAL_SYSTEM_INSTRUCTION
-                raw_tools = [get_user_details_tool, show_system_capabilities_tool]
-            else:  # unknown / unsupported
-                system_instruction = UNKNOWN_SYSTEM_INSTRUCTION
-                raw_tools = []
+            elif intent == "unknown":
+                system_instruction = GENERAL_SYSTEM_INSTRUCTION
+            else:
+                system_instruction = GENERAL_SYSTEM_INSTRUCTION
 
             # Simulate alternative models by adjusting system prompt
             if model and model != "gemini":
@@ -2105,8 +2944,6 @@ def generate_and_save_response(
                 disp_name = model_name_map.get(model, model)
                 system_instruction += f"\n\n[SYSTEM NOTE: You are simulating {disp_name}. Reply in the tone and style of {disp_name}. Keep all Teamcenter functionality and responses precise and valid.]"
 
-            tools = [wrap_tool(t) for t in raw_tools]
-
             # Look up custom Gemini key for the user
             custom_gemini_key = None
             with get_db_connection() as c_db:
@@ -2116,19 +2953,137 @@ def generate_and_save_response(
                     if not custom_gemini_key:
                         custom_gemini_key = None
 
-            config = types.GenerateContentConfig(
-                tools=tools,
-                system_instruction=system_instruction,
-                temperature=0.4 if intent == "casual" else 0.2
-            )
+            try:
+                if intent in ["general_knowledge", "casual", "general_coding", "unknown"]:
+                    logger.info(f"Bypassing MCP tools for intent: {intent}")
+                    config = types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.4 if intent == "casual" else 0.2
+                    )
+                    response = await asyncio.to_thread(
+                        call_gemini_generate_content,
+                        model=GEMINI_MODEL,
+                        contents=contents,
+                        config=config,
+                        custom_key=custom_gemini_key
+                    )
+                    ai_response_text = response.text or ""
+                else:
+                    # Open connection to FastMCP Server
+                    async with stdio_client(server_params) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            
+                            # List all tools and register them dynamically
+                            tools_result = await session.list_tools()
+                            declarations = []
+                            for tool in tools_result.tools:
+                                is_utility = tool.name in ["get_user_details", "show_system_capabilities"]
+                                if intent in ["teamcenter_technical", "teamcenter_retrieval"] or is_utility:
+                                    declarations.append(
+                                        types.FunctionDeclaration(
+                                            name=tool.name,
+                                            description=tool.description or "",
+                                            parameters={
+                                                "type": "object",
+                                                "properties": tool.inputSchema.get("properties", {}),
+                                                "required": tool.inputSchema.get("required", []),
+                                            },
+                                        )
+                                    )
 
-            response = call_gemini_generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=config,
-                custom_key=custom_gemini_key
-            )
-            ai_response_text = response.text or ""
+                            gemini_tools = [types.Tool(function_declarations=declarations)] if declarations else []
+
+                            config = types.GenerateContentConfig(
+                                tools=gemini_tools,
+                                system_instruction=system_instruction,
+                                temperature=0.4 if intent == "casual" else 0.2
+                            )
+
+                            response = await asyncio.to_thread(
+                                call_gemini_generate_content,
+                                model=GEMINI_MODEL,
+                                contents=contents,
+                                config=config,
+                                custom_key=custom_gemini_key
+                            )
+
+                            # Loop to resolve model tool requests
+                            while response.function_calls:
+                                function_responses = []
+                                for function_call in response.function_calls:
+                                    tool_name = function_call.name
+                                    tool_args = dict(function_call.args)
+                                    
+                                    start_t = time.perf_counter()
+                                    logger.info(f"MCP client invoking tool: {tool_name} with args {tool_args}")
+                                    mcp_result = await session.call_tool(tool_name, arguments=tool_args)
+                                    duration_ms = (time.perf_counter() - start_t) * 1000.0
+                                    
+                                    extracted = []
+                                    for content in mcp_result.content:
+                                        if hasattr(content, "text"):
+                                            try:
+                                                extracted.append(json.loads(content.text))
+                                            except Exception:
+                                                extracted.append(content.text)
+                                    tool_result = extracted[0] if len(extracted) == 1 else extracted
+                                    
+                                    logger.info(f"MCP client response: {tool_result}")
+                                    
+                                    call_status = "success"
+                                    if isinstance(tool_result, dict) and (tool_result.get("status") == "error" or "error" in tool_result):
+                                        call_status = "error"
+                                    elif isinstance(tool_result, str) and tool_result.lower().startswith("error"):
+                                        call_status = "error"
+
+                                    if executed_tools is not None:
+                                        executed_tools.append({
+                                            "name": tool_name,
+                                            "parameters": tool_args,
+                                            "result": str(tool_result),
+                                            "duration_ms": round(duration_ms, 2),
+                                            "status": call_status
+                                        })
+                                    
+                                    function_responses.append(
+                                        types.Part.from_function_response(
+                                            name=tool_name,
+                                            response={"result": tool_result}
+                                        )
+                                    )
+                                
+                                contents.append(
+                                    types.Content(
+                                        role="model",
+                                        parts=[
+                                            types.Part.from_function_call(
+                                                name=fc.name,
+                                                args=fc.args
+                                            ) for fc in response.function_calls
+                                        ]
+                                    )
+                                )
+                                contents.append(
+                                    types.Content(
+                                        role="user",
+                                        parts=function_responses
+                                    )
+                                )
+                                
+                                response = await asyncio.to_thread(
+                                    call_gemini_generate_content,
+                                    model=GEMINI_MODEL,
+                                    contents=contents,
+                                    config=config,
+                                    custom_key=custom_gemini_key
+                                )
+
+                            ai_response_text = response.text or ""
+            except Exception as mcp_err:
+                logger.error(f"MCP client execution or connection error: {mcp_err}")
+                ai_response_text = None
+                gemini_error_type = str(mcp_err)
         except Exception as gemini_err:
             logger.error(f"Gemini generation error: {gemini_err}")
             ai_response_text = None
@@ -2137,27 +3092,32 @@ def generate_and_save_response(
         gemini_error_type = "no_client"
 
     if not ai_response_text:
-        # Silently handle Gemini exceptions and return a conversational natural reply (masking technical errors/quota limits).
-        import random
-        natural_fallbacks = [
-            "I'm still here and ready to help. Let's continue.",
-            "I'm here and ready to assist you. What can I do for you next?",
-            "Let's continue. Please let me know what you need.",
-            "I am ready to help. What would you like to explore next?"
-        ]
-        ai_response_text = random.choice(natural_fallbacks)
+        if gemini_error_type and ("429" in gemini_error_type or "resource_exhausted" in gemini_error_type.lower() or "quota" in gemini_error_type.lower()):
+            ai_response_text = "I'm sorry, I am currently experiencing Gemini API rate limits. Please try again in a few seconds."
+        elif gemini_error_type and ("503" in gemini_error_type or "unavailable" in gemini_error_type.lower()):
+            ai_response_text = "I'm sorry, the Gemini service is temporarily unavailable. Please try again in a few seconds."
+        else:
+            import random
+            natural_fallbacks = [
+                "I'm still here and ready to help. Let's continue.",
+                "I'm here and ready to assist you. What can I do for you next?",
+                "Let's continue. Please let me know what you need.",
+                "I am ready to help. What would you like to explore next?"
+            ]
+            ai_response_text = random.choice(natural_fallbacks)
 
-    # Save assistant response to DB
+    # Save assistant response with tool calls metadata
+    tool_calls_json = json.dumps(executed_tools) if executed_tools else None
     cursor = conn.execute(
-        "INSERT INTO chat_messages (user_id, session_id, sender, message, timestamp) VALUES (?, ?, 'assistant', ?, ?)",
-        (user_id, session_id, ai_response_text, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+        "INSERT INTO chat_messages (user_id, session_id, sender, message, timestamp, tool_calls) VALUES (?, ?, 'assistant', ?, ?, ?)",
+        (user_id, session_id, ai_response_text, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), tool_calls_json),
     )
     conn.commit()
     return ai_response_text, cursor.lastrowid
 
 
 @app.post("/chat/message")
-def send_chat(
+async def send_chat(
     request: ChatMessageRequest,
     user_id: str = Depends(get_authenticated_user_id),
 ) -> Dict[str, object]:
@@ -2190,7 +3150,7 @@ def send_chat(
             conn.commit()
 
         # Generate response using helper
-        ai_response_text, assistant_message_id = generate_and_save_response(
+        ai_response_text, assistant_message_id = await generate_and_save_response(
             conn, user_id, request.session_id, user_message_id, request.message
         )
 
@@ -2208,7 +3168,7 @@ def send_chat(
 
 
 @app.post("/chat/message/edit")
-def edit_chat_message(
+async def edit_chat_message(
     request: EditChatMessageRequest,
     user_id: str = Depends(get_authenticated_user_id),
 ) -> Dict[str, object]:
@@ -2240,7 +3200,7 @@ def edit_chat_message(
             )
         
         # Regenerate response using helper
-        ai_response_text, assistant_message_id = generate_and_save_response(
+        ai_response_text, assistant_message_id = await generate_and_save_response(
             conn, user_id, session_id, request.message_id, request.message
         )
         
@@ -2368,10 +3328,22 @@ def get_chat_history(
                     conn.commit()
 
         rows = conn.execute(
-            "SELECT id, sender, message, timestamp FROM chat_messages WHERE user_id = ? AND session_id = ? ORDER BY id ASC",
+            "SELECT id, sender, message, timestamp, tool_calls FROM chat_messages WHERE user_id = ? AND session_id = ? ORDER BY id ASC",
             (user_id, session_id)
         ).fetchall()
-    return [dict(row) for row in rows]
+    
+    res = []
+    for row in rows:
+        d = dict(row)
+        if "tool_calls" in d and d["tool_calls"]:
+            try:
+                d["tool_calls"] = json.loads(d["tool_calls"])
+            except Exception:
+                d["tool_calls"] = []
+        else:
+            d["tool_calls"] = []
+        res.append(d)
+    return res
 
 
 @app.get("/chat/sessions")
@@ -2425,21 +3397,208 @@ def get_chat_sessions(user_id: str = Depends(get_authenticated_user_id)) -> List
     return sessions
 
 
+def check_admin_privilege(user_id: str) -> None:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM user_permissions up
+            JOIN permissions p ON up.permission_id = p.id
+            JOIN users u ON up.user_id = u.rowid
+            WHERE u.username = ? AND p.permission_key = 'MANAGE_USERS'
+            """,
+            (user_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only users with MANAGE_USERS permission are allowed to perform user management tasks."
+            )
+
+
+class UpdatePermissionsPayload(BaseModel):
+    username: str
+    role: str
+    permissions: List[str]
+
+
 @app.get("/user/profile")
 def get_user_profile(user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, Any]:
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT username, api_key, created_at FROM users WHERE username = ?",
+            "SELECT username, api_key, created_at, role FROM users WHERE username = ?",
             (user_id,)
         ).fetchone()
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        
+        # Fetch permissions from database mapping
+        perm_rows = conn.execute(
+            """
+            SELECT p.permission_key 
+            FROM user_permissions up
+            JOIN permissions p ON up.permission_id = p.id
+            JOIN users u ON up.user_id = u.rowid
+            WHERE u.username = ?
+            """,
+            (user_id,)
+        ).fetchall()
+        permissions = [r["permission_key"] for r in perm_rows]
+        
     return {
         "username": row["username"],
         "api_key": row["api_key"],
         "created_at": row["created_at"],
-        "role": "Standard User"
+        "role": row["role"],
+        "permissions": permissions
     }
+
+
+@app.get("/api/admin/users")
+def admin_get_users(user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, Any]:
+    check_admin_privilege(user_id)
+    
+    with get_db_connection() as conn:
+        user_rows = conn.execute("SELECT rowid, username, role, created_at FROM users ORDER BY username ASC").fetchall()
+        
+        users_list = []
+        for u in user_rows:
+            uname = u["username"]
+            u_rowid = u["rowid"]
+            perm_rows = conn.execute(
+                """
+                SELECT p.permission_key 
+                FROM user_permissions up
+                JOIN permissions p ON up.permission_id = p.id
+                WHERE up.user_id = ?
+                """,
+                (u_rowid,)
+            ).fetchall()
+            perms = [r["permission_key"] for r in perm_rows]
+            
+            users_list.append({
+                "username": uname,
+                "role": u["role"],
+                "created_at": u["created_at"],
+                "permissions": perms
+            })
+            
+        master_perm_rows = conn.execute("SELECT permission_key, description FROM permissions ORDER BY id ASC").fetchall()
+        master_permissions = [{"key": r["permission_key"], "description": r["description"]} for r in master_perm_rows]
+        
+        role_rows = conn.execute("SELECT role_name FROM roles ORDER BY id ASC").fetchall()
+        master_roles = [r["role_name"] for r in role_rows]
+        
+    return {
+        "users": users_list,
+        "master_permissions": master_permissions,
+        "master_roles": master_roles
+    }
+
+
+@app.post("/api/admin/user/permissions")
+def admin_update_user_permissions(
+    payload: UpdatePermissionsPayload,
+    request: Request,
+    user_id: str = Depends(get_authenticated_user_id)
+) -> Dict[str, str]:
+    check_admin_privilege(user_id)
+    
+    target_user = payload.username.strip().lower()
+    target_role = payload.role.strip()
+    target_perms = payload.permissions
+    
+    # Extract IP and User-Agent
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    
+    with get_db_connection() as conn:
+        # Get acting admin details
+        admin_row = conn.execute("SELECT rowid, username FROM users WHERE username = ?", (user_id,)).fetchone()
+        if not admin_row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Acting admin user not found")
+        admin_rowid = admin_row["rowid"]
+        admin_name = admin_row["username"]
+        
+        # Get target user details
+        target_row = conn.execute("SELECT rowid, username, role FROM users WHERE username = ?", (target_user,)).fetchone()
+        if not target_row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target user not found")
+        target_rowid = target_row["rowid"]
+        target_name = target_row["username"]
+        old_role = target_row["role"]
+        
+        # Enforce self-lockout check: At least one Administrator account must remain active
+        if old_role == "Administrator" and target_role != "Administrator":
+            admin_count = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'Administrator'").fetchone()[0]
+            if admin_count <= 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="At least one Administrator account must remain active."
+                )
+                
+        # Fetch old permissions
+        old_perm_rows = conn.execute(
+            """
+            SELECT p.permission_key 
+            FROM user_permissions up
+            JOIN permissions p ON up.permission_id = p.id
+            WHERE up.user_id = ?
+            """,
+            (target_rowid,)
+        ).fetchall()
+        old_permissions = {r["permission_key"] for r in old_perm_rows}
+        
+        # Update user role
+        conn.execute("UPDATE users SET role = ? WHERE rowid = ?", (target_role, target_rowid))
+        
+        # Sync permissions
+        conn.execute("DELETE FROM user_permissions WHERE user_id = ?", (target_rowid,))
+        for p_key in target_perms:
+            conn.execute(
+                """
+                INSERT INTO user_permissions (user_id, permission_id)
+                SELECT ?, id FROM permissions WHERE permission_key = ?
+                """,
+                (target_rowid, p_key)
+            )
+            
+        # Log audits in UTC ISO 8601 format
+        now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        # Role changed audit log
+        if old_role != target_role:
+            conn.execute(
+                """
+                INSERT INTO audit_logs (timestamp, admin_user_id, admin_username, target_user_id, target_username, action_type, old_value, new_value, ip_address, user_agent)
+                VALUES (?, ?, ?, ?, ?, 'ROLE_UPDATED', ?, ?, ?, ?)
+                """,
+                (now_str, admin_rowid, admin_name, target_rowid, target_name, old_role, target_role, ip_address, user_agent)
+            )
+            
+        # Permissions diff
+        for p_key in target_perms:
+            if p_key not in old_permissions:
+                conn.execute(
+                    """
+                    INSERT INTO audit_logs (timestamp, admin_user_id, admin_username, target_user_id, target_username, action_type, old_value, new_value, ip_address, user_agent)
+                    VALUES (?, ?, ?, ?, ?, 'PERMISSION_GRANTED', NULL, ?, ?, ?)
+                    """,
+                    (now_str, admin_rowid, admin_name, target_rowid, target_name, p_key, ip_address, user_agent)
+                )
+                
+        for p_key in old_permissions:
+            if p_key not in target_perms:
+                conn.execute(
+                    """
+                    INSERT INTO audit_logs (timestamp, admin_user_id, admin_username, target_user_id, target_username, action_type, old_value, new_value, ip_address, user_agent)
+                    VALUES (?, ?, ?, ?, ?, 'PERMISSION_REVOKED', NULL, ?, ?, ?)
+                    """,
+                    (now_str, admin_rowid, admin_name, target_rowid, target_name, p_key, ip_address, user_agent)
+                )
+                
+        conn.commit()
+        
+    return {"message": f"Successfully updated permissions for user '{target_user}'."}
 
 
 @app.get("/user/activity-logs")
@@ -2643,6 +3802,86 @@ def delete_item_endpoint(request: ItemDeleteRequest, user_id: str = Depends(get_
     return {"message": "Item deleted successfully"}
 
 
+# --- BOM Endpoints ---
+@app.post("/bom/get")
+def get_bom_endpoint(request: BomRequest, user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, Any]:
+    parent_id = normalize_item_id(request.item_id)
+    with get_db_connection() as conn:
+        item_row = conn.execute("SELECT item_name FROM items WHERE item_id = ?", (parent_id,)).fetchone()
+        if not item_row:
+            raise HTTPException(status_code=404, detail=f"Parent item '{parent_id}' not found")
+        
+        cursor = conn.execute(
+            """
+            SELECT b.child_item_id, b.quantity, i.item_name, i.item_description
+            FROM bom_relations b
+            JOIN items i ON b.child_item_id = i.item_id
+            WHERE b.parent_item_id = ?
+            """,
+            (parent_id,)
+        )
+        rows = cursor.fetchall()
+        
+    bom_components = []
+    for r in rows:
+        bom_components.append({
+            "child_item_id": r["child_item_id"],
+            "child_item_name": r["item_name"] or "",
+            "child_item_description": r["item_description"] or "",
+            "quantity": r["quantity"]
+        })
+        
+    return {
+        "item_id": parent_id,
+        "item_name": item_row["item_name"] or "",
+        "bom_components": bom_components
+    }
+
+
+@app.post("/bom/expand")
+def expand_bom_endpoint(request: BomRequest, user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, Any]:
+    parent_id = normalize_item_id(request.item_id)
+    with get_db_connection() as conn:
+        item_row = conn.execute("SELECT item_name FROM items WHERE item_id = ?", (parent_id,)).fetchone()
+        if not item_row:
+            raise HTTPException(status_code=404, detail=f"Parent item '{parent_id}' not found")
+            
+        def get_children_recursive(p_id: str, level: int) -> List[Dict[str, Any]]:
+            cursor = conn.execute(
+                """
+                SELECT b.child_item_id, b.quantity, i.item_name, i.item_description
+                FROM bom_relations b
+                JOIN items i ON b.child_item_id = i.item_id
+                WHERE b.parent_item_id = ?
+                """,
+                (p_id,)
+            )
+            rows = cursor.fetchall()
+            children = []
+            for r in rows:
+                child_id = r["child_item_id"]
+                child_node = {
+                    "item_id": child_id,
+                    "item_name": r["item_name"] or "",
+                    "item_description": r["item_description"] or "",
+                    "quantity": r["quantity"],
+                    "level": level
+                }
+                sub_children = get_children_recursive(child_id, level + 1)
+                if sub_children:
+                    child_node["children"] = sub_children
+                children.append(child_node)
+            return children
+            
+        hierarchy = get_children_recursive(parent_id, 1)
+        
+    return {
+        "item_id": parent_id,
+        "item_name": item_row["item_name"] or "",
+        "expanded_bom": hierarchy
+    }
+
+
 # --- Datasets Endpoints ---
 @app.post("/dataset/add")
 def add_dataset(request: DatasetAddRequest, user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, str]:
@@ -2711,6 +3950,37 @@ def list_datasets(request: ListFilterRequest, user_id: str = Depends(get_authent
         else:
             rows = conn.execute("SELECT * FROM datasets").fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/dataset/download/{dataset_id}")
+def download_dataset_endpoint(dataset_id: str, user_id: str = Depends(get_authenticated_user_id)):
+    ds_id = dataset_id.strip()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT dataset_name, item_id FROM datasets WHERE dataset_id = ?", (ds_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Dataset '{ds_id}' not found")
+        
+    content = (
+        f"--- Siemens Teamcenter Simulated Dataset Download ---\n"
+        f"Dataset ID: {ds_id}\n"
+        f"Dataset Name: {row['dataset_name']}\n"
+        f"Associated Item ID: {row['item_id']}\n"
+        f"Downloaded By User: {user_id}\n"
+        f"Timestamp: {datetime.utcnow().isoformat()}\n"
+        f"Status: SUCCESS\n"
+        f"---------------------------------------------------\n"
+    )
+    
+    temp_dir = BASE_DIR / "Data" / "temp"
+    temp_dir.mkdir(exist_ok=True)
+    temp_file_path = temp_dir / f"{ds_id}_download.txt"
+    temp_file_path.write_text(content, encoding="utf-8")
+    
+    return FileResponse(
+        path=str(temp_file_path),
+        filename=f"{row['dataset_name']}.txt",
+        media_type="text/plain"
+    )
 
 
 # --- Revisions Endpoints ---
@@ -2868,6 +4138,23 @@ def list_workflows(request: ListFilterRequest, user_id: str = Depends(get_authen
     return [dict(r) for r in rows]
 
 
+@app.post("/workflow/approve")
+def approve_workflow_endpoint(request: WorkflowApproveRequest, user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, str]:
+    wf_id = request.workflow_id.strip()
+    if not wf_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+        
+    now = datetime.utcnow().isoformat()
+    with get_db_connection() as conn:
+        existing = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wf_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        conn.execute("UPDATE workflows SET workflow_status = 'Approved', updatedAt = ? WHERE workflow_id = ?", (now, wf_id))
+        conn.commit()
+        log_user_activity(conn, user_id, "/workflow/approve", f"workflow_approve:{wf_id}")
+    return {"message": "Workflow approved successfully"}
+
+
 # --- Users Endpoints ---
 @app.post("/user/delete")
 def delete_user_endpoint(request: UserDeleteRequest, user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, str]:
@@ -2905,7 +4192,7 @@ def list_users_endpoint(user_id: str = Depends(get_authenticated_user_id)) -> Li
 # --- Interactive PLM AI Engine Endpoints ---
 
 @app.post("/api/chat", response_model=ApiChatResponse)
-def api_chat(
+async def api_chat(
     request: ApiChatRequest,
     user_id: str = Depends(get_authenticated_user_id)
 ) -> ApiChatResponse:
@@ -2939,7 +4226,7 @@ def api_chat(
 
         executed_tools = []
         # Generate response using helper
-        ai_response_text, assistant_message_id = generate_and_save_response(
+        ai_response_text, assistant_message_id = await generate_and_save_response(
             conn=conn,
             user_id=user_id,
             session_id=request.sessionId,
@@ -3143,6 +4430,66 @@ def get_audit_logs(
     }
 
 
+@app.get("/api/logs/errors")
+def get_error_logs(
+    page: int = 1,
+    limit: int = 20,
+    query: Optional[str] = None,
+    status: str = "all",
+    service: Optional[str] = None,
+    tool: Optional[str] = None,
+    user: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user_id: str = Depends(get_authenticated_user_id)
+) -> Dict[str, Any]:
+    return query_error_logs(
+        page=page,
+        limit=limit,
+        query=query,
+        status=status,
+        service=service,
+        tool=tool,
+        user=user,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+@app.get("/api/logs/metrics")
+def get_logs_metrics(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    service: Optional[str] = None,
+    user: Optional[str] = None,
+    user_id: str = Depends(get_authenticated_user_id)
+) -> Dict[str, Any]:
+    return get_log_metrics(
+        start_date=start_date,
+        end_date=end_date,
+        service=service,
+        user=user,
+    )
+
+
+@app.get("/api/logs/trends")
+def get_logs_trends(
+    granularity: str = "hour",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    service: Optional[str] = None,
+    user: Optional[str] = None,
+    user_id: str = Depends(get_authenticated_user_id)
+) -> Dict[str, Any]:
+    return get_log_trends(
+        granularity=granularity,
+        start_date=start_date,
+        end_date=end_date,
+        service=service,
+        user=user,
+    )
+
+
 @app.get("/user/settings", response_model=UserSettingsResponse)
 def get_user_settings(user_id: str = Depends(get_authenticated_user_id)) -> UserSettingsResponse:
     with get_db_connection() as conn:
@@ -3173,6 +4520,43 @@ def get_user_settings(user_id: str = Depends(get_authenticated_user_id)) -> User
         active_model=row["active_model"] or "gemini",
         active_env=row["active_env"] or "dev"
     )
+
+
+@app.get("/api/demo/status")
+def get_demo_status(user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, Any]:
+    cfg = demo_service.get_config()
+    return {**(cfg.__dict__ if hasattr(cfg, '__dict__') else {}), "demo_mode": cfg.demo_mode}
+
+
+@app.post("/api/demo/config")
+def post_demo_config(payload: Dict[str, Any], user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, Any]:
+    allowed = {"demo_mode", "latency_ms", "error_rate", "timeout_rate", "slow_network_ms", "expired_session_rate"}
+    updates = {k: payload.get(k) for k in payload.keys() & allowed}
+    # coerce types
+    if "demo_mode" in updates:
+        updates["demo_mode"] = bool(updates["demo_mode"])
+    if "latency_ms" in updates:
+        updates["latency_ms"] = int(updates["latency_ms"])
+    if "slow_network_ms" in updates:
+        updates["slow_network_ms"] = int(updates["slow_network_ms"])
+    for f in ("error_rate", "timeout_rate", "expired_session_rate"):
+        if f in updates:
+            try:
+                updates[f] = float(updates[f])
+            except Exception:
+                updates[f] = 0.0
+
+    cfg = demo_service.update_config(**updates)
+    return {"status": "success", "config": cfg.__dict__}
+
+
+@app.post("/api/demo/reset")
+def post_demo_reset(user_id: str = Depends(get_authenticated_user_id)) -> Dict[str, Any]:
+    try:
+        demo_service.reset_mock_data()
+        return {"status": "success", "message": "Mock data reset to seed files."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/user/settings")
@@ -3244,10 +4628,43 @@ def reset_password(
     return {"status": "success", "message": "Password updated successfully"}
 
 
+# Include Metadata Explorer Router
+backend_path = str(BASE_DIR / "backend")
+if backend_path not in sys.path:
+    sys.path.insert(0, backend_path)
+from teamcenter.metadata import router as metadata_router
+app.include_router(metadata_router, prefix="/api/metadata")
+
+from teamcenter.search_engine import router as search_router
+app.include_router(search_router, prefix="/api/advanced-search")
+
+from teamcenter.health import router as health_router
+app.include_router(health_router)
+
+from teamcenter.dynamic_executor.router import router as executor_router, raw_router as teamcenter_raw_router
+from services.api_catalog import router as explorer_router
+app.include_router(executor_router, prefix="/api/dynamic-executor")
+app.include_router(teamcenter_raw_router, prefix="/api/teamcenter")
+app.include_router(explorer_router)
+
+from teamcenter.api_catalog import router as catalog_router
+app.include_router(catalog_router)
+
+from teamcenter.property_service import router as property_router
+app.include_router(property_router)
+
+from teamcenter.mcp_explorer import router as mcp_router
+app.include_router(mcp_router, prefix="/api/mcp")
+
+
 @app.get("/{catchall:path}", response_class=FileResponse)
+
+
+
+
+
 def read_index(catchall: str):
     index_file = FRONTEND_DIR / "index.html"
     if index_file.exists():
         return FileResponse(index_file)
     return HTMLResponse("<h1>Teamcenter backend is running</h1><p>Frontend build index.html was not found.</p>", status_code=404)
-

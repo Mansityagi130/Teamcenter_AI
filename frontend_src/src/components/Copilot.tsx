@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import apiClient from '../api';
+import { generateLocalTitle } from './SidebarComponents';
 import {
   RootState,
   addMessage,
@@ -57,6 +58,54 @@ export function Copilot() {
   const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   
+  // Expanded tool calls state in timelines
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
+
+  function toggleToolExpand(messageId: number, toolIdx: number) {
+    const key = `${messageId}-${toolIdx}`;
+    setExpandedTools((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  }
+
+  function getStreamingStatus(msgId: number) {
+    const idx = messages.findIndex((m) => m.id === msgId);
+    if (idx <= 0) return 'Thinking...';
+    const userMsg = messages[idx - 1];
+    if (!userMsg || userMsg.sender !== 'user') return 'Thinking...';
+    
+    const text = userMsg.message.toLowerCase();
+    
+    // Check if it is a general knowledge question
+    const isGeneralKnowledge = 
+      /^(what\s+is|what\s+are|explain|difference\s+between|define|definition\s+of|how\s+does|why\s+is|who\s+is)\b/.test(text) ||
+      /\bmeans\b/.test(text) ||
+      /\bexplain\b/.test(text) ||
+      /meaning\s+of/.test(text);
+      
+    if (isGeneralKnowledge) {
+      return 'Thinking...';
+    }
+    
+    if (text.includes('bom') || text.includes('structure') || text.includes('relation') || text.includes('assembly') || text.includes('expand')) {
+      return 'Fetching BOM...';
+    }
+    if (text.includes('type') || text.includes('schema') || text.includes('metadata') || text.includes('relationship')) {
+      return 'Loading Metadata...';
+    }
+    if (text.includes('search') || text.includes('find') || text.includes('query') || text.includes('items') || text.includes('dataset') || text.includes('workflow')) {
+      return 'Searching Teamcenter...';
+    }
+    if (text.includes('property') || text.includes('properties') || text.includes('inspect')) {
+      return 'Retrieving Properties...';
+    }
+    if (text.includes('health') || text.includes('session') || text.includes('status') || text.includes('auth')) {
+      return 'Checking Subsystems Health...';
+    }
+    return 'Thinking...';
+  }
+  
   const feedScrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -101,9 +150,26 @@ export function Copilot() {
 
     // Determine session ID
     let currentSessionId = activeSessionId;
+    const isFirstMessage = !currentSessionId || messages.length === 0;
     if (!currentSessionId) {
       currentSessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
       dispatch(setActiveSessionId(currentSessionId));
+    }
+
+    if (isFirstMessage) {
+      (async () => {
+        try {
+          const autoTitle = generateLocalTitle(text);
+          await apiClient.post('/chat/session/rename', {
+            session_id: currentSessionId,
+            title: autoTitle
+          });
+          const sRes = await apiClient.get('/chat/sessions');
+          dispatch(setSessions(sRes.data));
+        } catch (err) {
+          console.error('Failed to generate local title:', err);
+        }
+      })();
     }
 
     // Add user message to Redux
@@ -142,7 +208,7 @@ export function Copilot() {
     dispatch(addMessage({
       id: tempAssistantMsgId,
       sender: 'assistant',
-      message: 'Analyzing PLM data...',
+      message: 'Thinking...',
       timestamp: new Date().toLocaleTimeString(),
       isStreaming: true,
     }));
@@ -160,12 +226,14 @@ export function Copilot() {
 
       // Typewriter/Streaming effect for response
       const reply = res.data.reply;
+      const toolCalls = res.data.toolCalls || [];
       let currentLength = 0;
       const interval = setInterval(() => {
         currentLength += Math.min(5, reply.length - currentLength);
         dispatch(updateLastAssistantMessage({
           message: reply.substring(0, currentLength),
           isStreaming: currentLength < reply.length,
+          tool_calls: currentLength >= reply.length ? toolCalls : undefined,
         }));
         if (currentLength >= reply.length) {
           clearInterval(interval);
@@ -436,17 +504,89 @@ export function Copilot() {
                           </button>
                         </div>
                       </div>
+                    ) : msg.isStreaming && (msg.message === 'Analyzing PLM data...' || msg.message === 'Thinking...' || msg.message === 'Regenerating response...') ? (
+                      <div className="flex items-center gap-2 font-semibold text-secondary-fixed-dim py-1.5 animate-pulse select-none">
+                        <span className="material-symbols-outlined animate-spin text-sm">sync</span>
+                        <span>{getStreamingStatus(msg.id)}</span>
+                      </div>
                     ) : (
-                      <div
-                        className="markdown-body"
-                        dangerouslySetInnerHTML={{ __html: getMarkdownHtml(msg.message) }}
-                        onClick={() => {
-                          if (isUser) {
-                            setEditingMessageId(msg.id);
-                            setEditText(msg.message);
-                          }
-                        }}
-                      />
+                      <div className="space-y-1">
+                        {!isUser && msg.tool_calls && msg.tool_calls.length > 0 && (
+                          <div className="flex items-center gap-1.5 text-[9px] bg-green-500/10 border border-green-500/20 text-green-400 px-2.5 py-0.5 rounded-full w-fit font-bold select-none mb-2">
+                            <span className="material-symbols-outlined text-[10px] font-bold">database</span>
+                            <span>Generated using Teamcenter Live Data</span>
+                          </div>
+                        )}
+                        <div
+                          className="markdown-body"
+                          dangerouslySetInnerHTML={{ __html: getMarkdownHtml(msg.message) }}
+                          onClick={() => {
+                            if (isUser) {
+                              setEditingMessageId(msg.id);
+                              setEditText(msg.message);
+                            }
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {/* Tool Activity Timeline */}
+                    {!isUser && msg.tool_calls && msg.tool_calls.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-outline-variant/10 space-y-2">
+                        <div className="text-[10px] uppercase font-bold tracking-wider text-on-surface-variant flex items-center gap-1.5">
+                          <span className="material-symbols-outlined text-xs">timeline</span>
+                          <span>Tool Execution Activity</span>
+                        </div>
+                        
+                        <div className="pl-3 border-l-2 border-outline-variant/20 space-y-3">
+                          {msg.tool_calls.map((call: any, idx: number) => {
+                            const isExpanded = !!expandedTools[`${msg.id}-${idx}`];
+                            const isError = call.status === 'error';
+                            return (
+                              <div key={idx} className="relative pl-4 space-y-1">
+                                {/* Dotted marker */}
+                                <div className="absolute left-[-21px] top-1.5 w-2 h-2 rounded-full bg-secondary-fixed-dim border border-background"></div>
+                                
+                                <div className="flex flex-wrap items-center justify-between gap-gutter text-xs font-mono">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-secondary-fixed-dim font-bold">{call.name}</span>
+                                    <span className={`px-1.5 py-0.25 text-[9px] font-bold rounded ${
+                                      isError ? 'bg-error-container/30 text-error' : 'bg-green-500/10 text-green-400'
+                                    }`}>
+                                      {isError ? 'ERROR' : 'SUCCESS'}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2 text-[10px] text-on-surface-variant font-sans">
+                                    <span>{call.duration_ms || '20'} ms</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleToolExpand(msg.id, idx)}
+                                      className="p-0.5 hover:bg-surface-variant rounded text-on-surface-variant transition-colors outline-none"
+                                    >
+                                      <span className="material-symbols-outlined text-sm">
+                                        {isExpanded ? 'expand_less' : 'expand_more'}
+                                      </span>
+                                    </button>
+                                  </div>
+                                </div>
+                                
+                                {isExpanded && (
+                                  <div className="p-3 rounded-lg bg-[#0b1216]/90 border border-outline-variant/10 text-[10px] font-mono space-y-2 mt-1 select-text">
+                                    <div>
+                                      <span className="text-[8px] uppercase tracking-wider text-on-surface-variant block font-bold font-sans">Arguments (Input)</span>
+                                      <pre className="text-secondary-fixed-dim whitespace-pre-wrap pl-1">{JSON.stringify(call.parameters, null, 2)}</pre>
+                                    </div>
+                                    <div className="border-t border-outline-variant/10 pt-1.5 mt-1">
+                                      <span className="text-[8px] uppercase tracking-wider text-on-surface-variant block font-bold font-sans">Result Output</span>
+                                      <pre className="text-[#74f5ff] max-h-[140px] overflow-y-auto whitespace-pre-wrap pl-1 terminal-scroll">{call.result}</pre>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
                     )}
 
                     {!isUser && !msg.isStreaming && (
